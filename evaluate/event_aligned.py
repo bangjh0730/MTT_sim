@@ -34,6 +34,26 @@ check only and cannot resolve a single target's recovery.
 Run:  python -m evaluate.event_aligned
       python -m evaluate.event_aligned --metric rmse
 """
+# ---------------------------------------------------------------------------
+# COVERAGE-ERA ANALYSIS — NOT UPDATED FOR THE OVERLOADED / RESCUE REGIME.
+#
+# This script was written when the simulation guaranteed |K| <= |U|: every target
+# had its own UAV, a disturbance opened a COVERAGE GAP, and the thing worth
+# measuring was how many slots the system took to close that gap and bring the
+# target's PCRLB back down. None of those premises hold any more. With 3 UAVs and
+# 8+ targets most targets are unsensed in any given slot by construction, so
+# there is no coverage gap to open and no recovery to time; targets now leave by
+# being RESCUED, and the objective is the average rescue delay (Eq. 19).
+#
+# It is kept for reference rather than deleted, but it reads npz fields that
+# evaluate/utils.py no longer writes (single-id `assignments`, `death_events`)
+# and will not run against new results. The replacements are:
+#   * per-run mission curves ....... evaluate/plot.py::plot_eval_rescue
+#   * policy comparison ............ evaluate/plot.py::plot_mode_comparison
+#   * cross-run / lambda sweep ..... evaluate/compare_runs.py
+#   * LLM tier cost ................ evaluate/llm_latency.py
+# ---------------------------------------------------------------------------
+
 import os
 import argparse
 import warnings

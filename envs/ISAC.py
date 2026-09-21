@@ -8,6 +8,12 @@ from config.params import (
 )
 
 
+# Nominal sensing dwell: the paper's ISAC sensing fraction (tau = 0.5) applied to
+# one slot. Used only for geometry-only reachability queries, never for an actual
+# measurement -- a real measurement always uses the dwell the policy resolved.
+TAU_REF = 0.5 * DT
+
+
 def _slant_range(uav, target_pos2d):
     """3D range from UAV to a ground target: horizontal distance plus altitude H.
     The radar echo travels this slant path, not the horizontal projection — using
@@ -19,9 +25,18 @@ def _slant_range(uav, target_pos2d):
     return max(float(np.sqrt(dx**2 + dy**2 + H**2)), 1e-3)
 
 
-def radar_snr(uav, target_pos2d):
+def radar_snr(uav, target_pos2d, tau=None):
+    """Radar SNR for a dwell of `tau` seconds on the target (default: the dwell
+    the UAV actually resolved this slot).
+
+    Passing an explicit tau is what makes REACHABILITY a property of geometry
+    rather than of this slot's particular dwell choice: "could I detect that set
+    member from where I am standing" should not flip just because the policy
+    traded dwell for uplink rate on this one slot. The observation and reward use
+    TAU_REF for exactly that reason (see marl/preprocess.py)."""
     r = _slant_range(uav, target_pos2d)
-    return SNR0 * (uav.tau / TAU0) * (r / R0) ** (-4)
+    tau = uav.tau if tau is None else tau
+    return SNR0 * (tau / TAU0) * (r / R0) ** (-4)
 
 
 def measure(uav, target_pos2d):

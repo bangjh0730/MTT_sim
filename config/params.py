@@ -6,14 +6,25 @@ T_SLOTS       = 1000   # total simulation slots (eval)
 T_SLOTS_TRAIN = 500   # shorter horizon for training
 
 # ---- Scenario ----
-MAP_SIZE    = 6000.0  # m, square simulation area
-NUM_UAVS    = 7
-NUM_TARGETS = 5
+# Overloaded regime: fewer UAVs than targets (|K| > |U| is the NORMAL state, not a
+# failure). A UAV therefore holds a SET of targets and cycles its sensing among
+# them; full simultaneous coverage is impossible by construction.
+MAP_SIZE    = 2000.0  # m, square simulation area (2 x 2 km post-disaster area)
+NUM_UAVS    = 3
+NUM_TARGETS = 8       # initial targets; more are born mid-mission
+
+# One-to-many assignment switch. True: a UAV holds an arbitrary set of targets.
+# False: sets are capped at one member — the "w/o one-to-many" ablation, which
+# reproduces the old single-target assignment path.
+ONE_TO_MANY = True
 
 # ---- UAV kinematics ----
-H     = 100.0              # m, fixed altitude
-V_MAX = 40.0    # m/s
-D_MIN = 100.0   # m, collision avoidance
+H     = 100.0   # m, fixed altitude
+V_MAX = 25.0    # m/s
+# Collision-avoidance separation. 100 m was sized for the old 6 km map; on a 2 km
+# map with 3 UAVs cycling large sets it would forbid most useful geometries, so it
+# is retuned to the paper's 20 m.
+D_MIN = 20.0    # m
 
 # ---- UAV propulsion ----
 P0      = 79.9    # W, blade profile power
@@ -81,17 +92,104 @@ Q_MAT = SIGMA_W2 * np.array([
 SIGMA_R2_0     = 10.0    # m²
 SIGMA_THETA2_0 = 1e-4    # rad²
 
-# ---- UAV Failure Model (evaluation only) ----
-BETA_FAIL      = 0.0008   # per-UAV failure rate per slot
-D_MAX_FAIL     = 2       # max UAVs a single shock can eliminate per target group
-N_FAIL_DETECT  = 5       # consecutive silent slots before BS declares a UAV lost
+# ---- Rescue Model ----
+# A target is rescued (and removed) with probability p_r = LAMBDA_RESCUE /
+# (LAMBDA_RESCUE + tr(Sigma_pos)), evaluated every slot on the BS's own position
+# covariance. The model is CONTINUOUS — no "is it tracked" threshold is needed:
+# a well-sensed target sits at small tr(Sigma) and is rescued quickly, while an
+# unsensed target's tr(Sigma) grows without bound and drives p_r toward 0.
+#
+# LAMBDA_RESCUE sets the LOAD REGIME and is the main sweep axis of the experiment:
+# small lambda keeps the system in persistent heavy overload; large lambda lets it
+# repeatedly drain to a manageable state.
+#
+# CALIBRATION. Both numbers below were measured on this simulator, not guessed:
+# the radar is accurate enough at these ranges that one delivered measurement
+# drops tr(Sigma_pos) to a median of ~0.075 m^2 (5th-95th pct: 7e-5 .. 0.70,
+# driven by the r^-4 SNR law), while a target nobody senses climbs past 1e4 m^2
+# within a few slots. p_r is therefore effectively lambda/(lambda + tr) for the
+# ONE target each UAV senses per slot, and ~0 for every other — so the fleet's
+# rescue throughput is capped by set-cycling rate, not by geometry. That is the
+# rate-vs-breadth tradeoff the allocator exists to reason about.
+#
+# lambda = 0.005 puts a sensed target's median dwell near 10 slots. Measured over
+# a 1000-slot run against a naive least-loaded placement, that yields ~50 rescues
+# (one every ~20 slots), a mean backlog of ~4.5 with |K| > |U| in ~70% of slots,
+# and occasional drains to a manageable state — i.e. the system spends most of its
+# time overloaded but visits BOTH regimes, which is what makes the judge's
+# regime-adaptive reasoning observable rather than hypothetical.
+#
+# The knife edges on either side are sharp, which is why this is calibrated rather
+# than assumed. lambda >= 0.03 makes rescue near-certain the moment a target is
+# sensed: the backlog drains to ~2 and the problem collapses to "fly at the
+# nearest target". lambda <= 0.002 tips the system into runaway saturation — sets
+# grow, each member is sensed more rarely, tr(Sigma) climbs, p_r falls further,
+# and the backlog pins at the id ceiling. Sweep lambda across that span to
+# demonstrate regime-adaptivity; do not wander outside it without re-measuring.
+LAMBDA_RESCUE = 0.005  # m^2
+
+# Rescue is policy-dependent BY DESIGN (better tracking -> faster rescue), so
+# unlike births it can never be pre-scheduled. It is drawn from a per-target-id
+# RNG stream so a target's own draws depend only on its own lifetime.
+
+# ---- UAV liveness ----
+# There is no UAV failure model. The fleet is fixed at NUM_UAVS and every UAV is
+# active for the whole mission, so there is no shock-failure rate, no BS
+# silence-detection delay, and no path by which a UAV leaves the fleet. Battery
+# energy is still tracked and penalised in the reward (see marl/reward.py), but
+# depleting it no longer removes a UAV -- with only 3 UAVs carrying the entire
+# backlog, losing one would not test the allocator, it would just end the run.
 
 # ---- Target Birth/Death Model (evaluation only) ----
-# Targets may appear and disappear mid-mission. Each slot a new target is born
-# with probability P_BIRTH, and each present target survives with probability
-# P_SURVIVE (dies with 1 - P_SURVIVE). Target ids stay within [0, MAX_TARGETS-1]
-# (births fill freed slots) so the fixed-size assignment / logging structures are
-# unaffected. Not used in training.
-P_BIRTH     = 0.005          # prob a new target appears each slot (~1 per 125 slots)
-P_SURVIVE   = 0.9995          # prob an existing target survives each slot (~330-slot mean life)
-MAX_TARGETS = NUM_UAVS       # |K^t| <= |U^t|: targets may reach one-per-active-UAV
+# Targets appear mid-mission with probability P_BIRTH per slot and leave ONLY by
+# being rescued (see the rescue model above) — there is no scheduled random death
+# any more. Births stay pre-scheduled so they are identical across modes for the
+# same seed; rescue cannot be, since it is the metric under test. Target ids stay
+# within [0, MAX_TARGETS-1] (births fill freed slots) so the fixed-size logging
+# structures are unaffected. Not used in training.
+# Birth rate. The paper's table lists 0.01, but that value predates the rescue
+# model, and it was calibrated here against the greedy baseline rather than
+# assumed. What the sweep shows (mean over 4 seeds, 1000 slots):
+#
+#   p_b    mean |K|   frac slots |K|>|U|   rescued/born   D-bar
+#   0.05     2.1            0.21              52/56        19 s
+#   0.09     3.2            0.37              88/95        17 s
+#   0.12     9.0            0.57             100/115       48 s
+#   0.15    21.6            0.93              68/100      119 s
+#
+# 0.01 would leave the map empty for most of the episode. 0.12 and above tips
+# the queue past capacity: the backlog runs away to the id ceiling and the run
+# stops measuring allocation quality and starts measuring saturation. 0.09 puts
+# arrivals just under the fleet's rescue throughput, so the system sits near
+# capacity — overloaded in ~37% of slots, draining to manageable in between.
+# That is what makes BOTH load regimes appear in one episode, which is precisely
+# what the judge's regime-adaptive reasoning has to be exercised against.
+#
+# P_BIRTH and LAMBDA_RESCUE jointly set the load and must be swept together.
+P_BIRTH     = 0.09           # prob a new target appears each slot
+# Ceiling on concurrently-live target ids. This is NOT a coverage invariant any
+# more: the old MAX_TARGETS = NUM_UAVS encoded "every target has its own UAV",
+# which is exactly the premise the overloaded regime discards. It is now only a
+# bound on the fixed-size id space used by the logging/plot arrays, set well above
+# any backlog a 1000-slot run can accumulate.
+MAX_TARGETS = 32
+
+
+# ---- Agentic AI (three-tier: detector -> judge -> planner) ----
+# Model cascade mirrors the tiers' cost asymmetry: the JUDGE runs often, on a
+# digest, and gets the light model; the PLANNER runs rarely, on full state, and
+# gets the stronger one.
+JUDGE_MODEL   = "gemini-3.1-flash-lite"
+PLANNER_MODEL = "gemini-3.1-flash"
+
+# The deterministic detector raises an alarm on every birth and every rescue.
+# Between those it also ticks periodically, so the slow load-imbalance that builds
+# up as targets wander (sets spread out, round-robin travel grows) still reaches
+# the judge. The periodic tick is a BACKSTOP, not the workhorse — birth and rescue
+# are the events that actually change the load regime.
+DETECTOR_TICK = 40    # slots between periodic (no-event) alarms
+
+# Minimum slots between two planner invocations. Prevents a burst of alarms from
+# thrashing the partition; the judge is what decides whether to spend a replan,
+# this is only the floor.
+REPLAN_COOLDOWN = 5

@@ -16,7 +16,7 @@ def _smooth(x: list, window: int) -> np.ndarray:
 
 def plot_training_curves(
     reward_hist: list,
-    pcrlb_hist: list,
+    delay_hist: list,
     actor_loss_hist: list,
     critic_loss_hist: list,
     plots_dir: str,
@@ -45,19 +45,24 @@ def plot_training_curves(
     fig.savefig(os.path.join(plots_dir, "train_reward.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # ── 2. PCRLB curve ───────────────────────────────────────────────────────
+    # ── 2. Average rescue delay ──────────────────────────────────────────────
+    # The mission objective D-bar (Eq. 19) replaces PCRLB here: PCRLB measured
+    # tracking accuracy under guaranteed coverage, which no longer exists — with
+    # |K| > |U| most targets are unsensed in any given slot by construction, so a
+    # coverage-era accuracy average says little about whether the fleet is
+    # actually clearing its backlog.
     fig, ax = plt.subplots(figsize=(10, 4))
-    pcrlb = np.asarray(pcrlb_hist, dtype=np.float64)
-    ax.plot(episodes, pcrlb, color="darkorange", alpha=0.25, lw=0.6, label="Raw")
-    ax.plot(episodes, _smooth(pcrlb, window), color="darkorange", lw=1.8,
+    delay = np.asarray(delay_hist, dtype=np.float64)
+    ax.plot(episodes, delay, color="darkorange", alpha=0.25, lw=0.6, label="Raw")
+    ax.plot(episodes, _smooth(delay, window), color="darkorange", lw=1.8,
             label=f"Smoothed (w={window})")
     ax.set_xlabel("Episode")
-    ax.set_ylabel("PCRLB (m²)")
-    ax.set_title("PCRLB — Tracking Phase (last 50 slots)")
+    ax.set_ylabel(r"$\bar{D}$ (s)")
+    ax.set_title("Average rescue delay")
     ax.legend(fontsize=9)
     ax.grid(True, ls=":", alpha=0.4)
     fig.tight_layout()
-    fig.savefig(os.path.join(plots_dir, "train_pcrlb.png"), dpi=150, bbox_inches="tight")
+    fig.savefig(os.path.join(plots_dir, "train_delay.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     # ── 3. Actor & critic loss ────────────────────────────────────────────────

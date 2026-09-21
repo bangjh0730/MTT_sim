@@ -1,5 +1,5 @@
 import numpy as np
-from config.params import DT, H, V_MAX, E_MAX
+from config.params import DT, H, V_MAX, E_MAX, ONE_TO_MANY
 
 
 class UAV:
@@ -15,12 +15,44 @@ class UAV:
         self.vx = float(init_vx)   # world-frame velocity x, m/s
         self.vy = float(init_vy)   # world-frame velocity y, m/s
 
-        self.assignment = None
+        # ---- Assignment (one-to-many) ----------------------------------
+        # The BS assigns a SET of targets A^t_i, not a single id: with |K| > |U|
+        # a UAV is responsible for several targets and cycles its sensing among
+        # them. `sensing_target` is the one member it actually measures THIS slot
+        # (chosen on the fast timescale by the env, see MTTEnv._pick_sensing_target);
+        # the set itself only changes when the BS re-partitions.
+        self.assignment_set: set = set()
+        self.sensing_target = None
         self.located    = False
         self.tau = 0.0
 
+        # Energy is a tracked cost, not a liveness condition: a UAV never leaves
+        # the fleet, so there is no `active` flag. Depletion is discouraged
+        # through the reward's energy penalty rather than by removing the UAV.
         self.energy = float(E_MAX)
-        self.active = True
+
+    # ---- assignment-set helpers ------------------------------------------
+    @property
+    def load(self) -> int:
+        """Number of targets this UAV is responsible for."""
+        return len(self.assignment_set)
+
+    def set_assignment(self, targets) -> None:
+        """Replace the assignment set. Under the one-to-many ablation
+        (ONE_TO_MANY=False) the set is truncated to a single target, which
+        reproduces the old single-assignment behaviour."""
+        s = {int(k) for k in targets if k is not None}
+        if not ONE_TO_MANY and len(s) > 1:
+            s = {sorted(s)[0]}
+        self.assignment_set = s
+        if self.sensing_target not in self.assignment_set:
+            self.sensing_target = None
+
+    def drop_target(self, k: int) -> None:
+        """Remove a target from the set (rescued, or reassigned elsewhere)."""
+        self.assignment_set.discard(int(k))
+        if self.sensing_target == k:
+            self.sensing_target = None
 
     @property
     def pos2d(self):
@@ -66,7 +98,4 @@ class UAV:
 
         self.tau = float(tau)
 
-        self.energy -= float(energy_cost)
-        if self.energy <= 0.0:
-            self.energy = 0.0
-            self.active = False
+        self.energy = max(self.energy - float(energy_cost), 0.0)

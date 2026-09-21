@@ -302,28 +302,126 @@ class MAPPO:
 
 
 # ---------------------------------------------------------------------------
-def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./results"):
-    """Training loop implementing the Dec-POMDP training procedure."""
-    agent = MAPPO()
+# Slots between training-time re-partitions of the assignment sets (mean of an
+# exponential draw, so the policy never sees a fixed re-partition rhythm).
+_TRAIN_REPARTITION_MEAN = 60
 
-    reward_hist           = []
-    pcrlb_hist            = []
-    pcrlb_per_target_hist = {k: [] for k in range(NUM_TARGETS)}
-    actor_loss_hist       = []
-    critic_loss_hist      = []
+
+def _random_partition(env, rng) -> None:
+    """Re-partition the live targets across the UAVs at random — TRAINING ONLY.
+
+    This is domain randomisation over the ASSIGNMENT, and it is here because of
+    an asymmetry between training and deployment: at evaluation the partitions
+    come from the LLM planner, which is deliberately not in the training loop, so
+    the policy must be robust to whatever partition it is handed rather than tuned
+    to the one heuristic that generated its training data. A policy trained only
+    on balanced, spatially-tidy sets would meet its first spread-out or lopsided
+    set at evaluation and have no idea what to do with it.
+
+    Three shapes are drawn, spanning what a planner plausibly emits:
+      * CLUSTERED  — each target to its nearest UAV. Spatially coherent sets,
+                     the easy case, and the one a good planner aims for.
+      * BALANCED   — equal-sized sets with random membership. Set members can be
+                     anywhere, so the UAV must find a compromise vantage point.
+      * LOPSIDED   — most of the backlog on one UAV, the rest nearly idle. This
+                     is the overload case, and it also trains the empty-set
+                     behaviour that a UAV needs when the planner leaves it free.
+
+    Targets are occasionally left unassigned, because the planner is explicitly
+    allowed to do that under saturation and the resulting state must not be
+    out-of-distribution for the critic.
+    """
+    live = sorted(env.targets)
+    if not live:
+        return
+    uav_ids = sorted(env.uavs)
+
+    # Leave a few targets to nobody now and then (never on the clustered draw,
+    # which is meant to be the clean case).
+    shape = rng.choice(["clustered", "balanced", "lopsided"], p=[0.4, 0.35, 0.25])
+    if shape != "clustered" and rng.random() < 0.25 and len(live) > len(uav_ids):
+        n_drop = rng.integers(1, max(2, len(live) // 4))
+        live = list(rng.permutation(live))[n_drop:]
+
+    table = {i: set() for i in uav_ids}
+    if shape == "clustered":
+        for k in live:
+            mu = env.ekf_state[k][0][:2]
+            i = min(uav_ids, key=lambda i: float(((env.uavs[i].pos2d - mu) ** 2).sum()))
+            table[i].add(k)
+    elif shape == "balanced":
+        for n, k in enumerate(rng.permutation(live)):
+            table[uav_ids[n % len(uav_ids)]].add(int(k))
+    else:  # lopsided
+        heavy = uav_ids[int(rng.integers(0, len(uav_ids)))]
+        for k in live:
+            i = heavy if rng.random() < 0.7 else uav_ids[int(rng.integers(0, len(uav_ids)))]
+            table[i].add(int(k))
+
+    env.apply_assignments(table)
+
+
+def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./results"):
+    """Training loop implementing the Dec-POMDP training procedure.
+
+    Targets are BORN and RESCUED during training, exactly as in evaluation, and
+    both matter for what the actor learns. Rescue is what makes a set shrink and
+    a UAV's job change mid-episode; births are what keep the map from draining
+    empty within ~150 slots and leaving the rest of the episode teaching nothing.
+    Because rescue depends on the tracking quality the policy itself achieves,
+    training is a genuine closed loop: fly well, clear the set, get a new one.
+
+    No LLM is involved. The assignment sets come from a naive placement for new
+    targets plus periodic RANDOM re-partitioning (see _random_partition), which
+    is what keeps the policy from co-adapting to any particular allocation style.
+    """
+    from envs.schedule import DisturbanceSchedule
+    from envs.births   import apply_births
+
+    agent = MAPPO()
+    rng   = np.random.default_rng()
+
+    reward_hist        = []
+    backlog_hist       = []     # mean |K^t| over the episode
+    delay_hist         = []     # D-bar (Eq. 19), seconds
+    rescued_hist       = []     # targets rescued per episode
+    actor_loss_hist    = []
+    critic_loss_hist   = []
 
     t_start = time.time()
     for ep in range(num_episodes):
         state     = env.reset()
         info      = None
         ep_reward = 0.0
-        ep_pcrlb  = []
-        ep_pcrlb_per_target = {k: [] for k in range(NUM_TARGETS)}
+        ep_backlog = []
 
-        # Only count PCRLB over the last 50 slots (steady-state tracking phase).
-        _pcrlb_start = env.T - 50
+        # A fresh birth schedule per episode; drawn up front so an episode's
+        # arrival pattern is fixed before the policy touches it.
+        schedule = DisturbanceSchedule(int(rng.integers(1 << 31)), env.T)
+        next_repartition = int(rng.exponential(_TRAIN_REPARTITION_MEAN))
 
         for t in range(env.T):
+            born = apply_births(env, schedule)
+            dirty = False
+
+            if born:
+                # Naive placement: least-loaded UAV takes the newcomer. The
+                # random re-partition below is what supplies variety; this only
+                # has to keep new targets from sitting unassigned by default.
+                table = env.assignment_table()
+                i = min(table, key=lambda i: (len(table[i]), i))
+                table[i] |= set(born)
+                env.apply_assignments(table)
+                dirty = True
+
+            if t >= next_repartition:
+                _random_partition(env, rng)
+                next_repartition = t + 1 + int(rng.exponential(_TRAIN_REPARTITION_MEAN))
+                dirty = True
+
+            if dirty:
+                state = env._system_state()
+
             actions     = agent.select_actions(state, info)
             state, info = env.step(actions)
 
@@ -332,17 +430,14 @@ def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./res
             agent.store_outcome(rewards, done)
 
             ep_reward += float(rewards.mean())
-            if t >= _pcrlb_start:
-                ep_pcrlb.append(info["pcrlb"])
-                for k in range(NUM_TARGETS):
-                    ep_pcrlb_per_target[k].append(info["pcrlb_per_target"][k])
+            ep_backlog.append(info["backlog"])
 
         al, cl = agent.update()
 
         reward_hist.append(ep_reward)
-        pcrlb_hist.append(float(np.mean(ep_pcrlb)))
-        for k in range(NUM_TARGETS):
-            pcrlb_per_target_hist[k].append(float(np.mean(ep_pcrlb_per_target[k])))
+        backlog_hist.append(float(np.mean(ep_backlog)))
+        delay_hist.append(float(env.avg_rescue_delay))
+        rescued_hist.append(len(env.rescue_delays))
         actor_loss_hist.append(al)
         critic_loss_hist.append(cl)
 
@@ -351,13 +446,10 @@ def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./res
             remaining = elapsed / (ep + 1) * (num_episodes - ep - 1)
             hh, mm    = divmod(int(remaining), 3600)
             mm, ss    = divmod(mm, 60)
-            per_tgt_str = "  ".join(
-                f"k{k}={pcrlb_per_target_hist[k][-1]:.4g}"
-                for k in range(NUM_TARGETS)
-            )
             print(
                 f"Episode {ep+1:4d} | "
-                f"PCRLB={pcrlb_hist[-1]:.4g} m²  [{per_tgt_str}] | "
+                f"D={delay_hist[-1]:7.1f} s | backlog={backlog_hist[-1]:5.2f} | "
+                f"rescued={rescued_hist[-1]:3d} | "
                 f"Reward={reward_hist[-1]/env.T:6.3f} | "
                 f"Actor={al:.4f} | Critic={cl:.4f} | "
                 f"ETA {hh:02d}:{mm:02d}:{ss:02d}"
@@ -365,17 +457,16 @@ def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./res
 
     agent.save(save_path)
     os.makedirs(save_path, exist_ok=True)
-    np.save(os.path.join(save_path, "marl_reward.npy"),      reward_hist)
-    np.save(os.path.join(save_path, "marl_pcrlb.npy"),       pcrlb_hist)
-    for k in range(NUM_TARGETS):
-        np.save(os.path.join(save_path, f"marl_pcrlb_target{k}.npy"),
-                pcrlb_per_target_hist[k])
-    np.save(os.path.join(save_path, "marl_actor_loss.npy"),  actor_loss_hist)
-    np.save(os.path.join(save_path, "marl_critic_loss.npy"), critic_loss_hist)
+    np.save(os.path.join(save_path, "marl_reward.npy"),       reward_hist)
+    np.save(os.path.join(save_path, "marl_delay.npy"),        delay_hist)
+    np.save(os.path.join(save_path, "marl_backlog.npy"),      backlog_hist)
+    np.save(os.path.join(save_path, "marl_rescued.npy"),      rescued_hist)
+    np.save(os.path.join(save_path, "marl_actor_loss.npy"),   actor_loss_hist)
+    np.save(os.path.join(save_path, "marl_critic_loss.npy"),  critic_loss_hist)
 
     plots_dir = os.path.join(save_path, "plots")
     plot_training_curves(
-        reward_hist, pcrlb_hist,
+        reward_hist, delay_hist,
         actor_loss_hist, critic_loss_hist,
         plots_dir, num_episodes,
     )

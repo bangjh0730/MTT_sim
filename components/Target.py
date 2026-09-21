@@ -11,14 +11,36 @@ class Target:
     """
     Ground target following constant-velocity motion with stochastic perturbation.
     State: s_k^t = [x_k, y_k, v_x,k, v_y,k]
+
+    A target persists from its birth until it is RESCUED; there is no random
+    death. Rescue is policy-dependent (it is driven by the BS's own tracking
+    uncertainty), so it is drawn online, never pre-scheduled — see envs/rescue.py.
     """
 
-    def __init__(self, target_id: int, init_pos: np.ndarray, init_vel: np.ndarray):
+    def __init__(self, target_id: int, init_pos: np.ndarray, init_vel: np.ndarray,
+                 birth_slot: int = 0):
         self.id = target_id
         self.state = np.array(
             [init_pos[0], init_pos[1], init_vel[0], init_vel[1]], dtype=float
         )
-        self.active = True
+        # ---- rescue bookkeeping ------------------------------------------
+        # A target now leaves the mission only by being RESCUED, so its whole
+        # life is the quantity the experiment measures. birth_slot is stamped at
+        # spawn (0 for the initial targets); rescue_slot is stamped when it is
+        # removed, and the difference is that target's rescue delay in slots.
+        self.birth_slot       = int(birth_slot)
+        self.rescue_slot      = None
+        self.rescued          = False
+        # Last slot a UAV actually delivered a measurement for this target. The
+        # gap (t - last_sensed_slot) is how long it has been going stale while
+        # its holder cycled through the rest of its set.
+        self.last_sensed_slot = int(birth_slot)
+
+    def rescue_delay(self, t_now: int) -> int:
+        """Slots spent awaiting rescue — up to the rescue, or up to t_now if the
+        target is still waiting (a censored life at the end of the episode)."""
+        end = self.rescue_slot if self.rescue_slot is not None else t_now
+        return int(end - self.birth_slot)
 
     @property
     def pos(self) -> np.ndarray:
