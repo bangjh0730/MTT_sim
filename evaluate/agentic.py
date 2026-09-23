@@ -2,19 +2,21 @@ import os
 import time
 import numpy as np
 
-from config.params      import T_SLOTS, NUM_UAVS, MAX_TARGETS, DT
-from evaluate.plot      import plot_trajectories
-from evaluate.marl      import _finish, _log_slot
-from evaluate.utils     import print_slot, print_assignments, seed_plots_dir
+from config.params  import T_SLOTS, NUM_UAVS, MAX_TARGETS, DT
+from evaluate.plot  import plot_trajectories, plot_eval_rescue
+from evaluate.utils import (print_slot, print_assignments, seed_plots_dir,
+                            print_evolution_summary)
 
 
-def eval_agentic(env, save_path: str, seed: int = None, births: bool = True):
-    """MARL trajectory control + the three-tier agentic allocator.
+def eval_agentic(env, save_path: str, seed: int = None, births: bool = True,
+                 realtime: bool = True):
+    """MAPPO trajectory control plus the three-tier agentic allocator.
 
-    The allocator runs detector (every slot, deterministic) -> judge (light LLM,
-    on an alarm) -> planner (heavy LLM, on approval), never blocking the
-    simulation: the judge/planner round trip runs in a daemon thread and its
-    result is installed whenever it lands.
+    Never blocks: the judge/planner round trip runs in a daemon thread.
+
+    realtime : sleep DT per slot so the LLM tiers see the mission's real
+        timescale, a slow round trip costing slots of stale partition. Turn off
+        only for plumbing tests.
     """
     from marl          import MAPPO
     from agentic       import AgenticAI
@@ -29,9 +31,9 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True):
     os.makedirs(plots_dir, exist_ok=True)
     agentic = AgenticAI(log_path=os.path.join(plots_dir, "llm_log.jsonl"))
 
-    # Same seeding as marl mode: the ARRIVING LOAD (births, target motion,
-    # measurement noise) is identical. Rescues are policy-dependent by
-    # construction and will differ — that difference is the measurement.
+    # The seed fixes the spawns, target motion, measurement noise and the birth
+    # schedule. RESCUES are deliberately not fixed: they depend on the tracking
+    # quality the policy achieves, which is what the run measures.
     if seed is not None:
         np.random.seed(seed)
     schedule = DisturbanceSchedule(seed, env.T)
@@ -40,11 +42,10 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True):
     state = env.reset()
     info  = None
 
-    # Both modes open from the SAME deterministic partition computed in
-    # env.reset(), so the runs start identically and the only variable under
-    # study is how the partition is revised from there.
-    print("[AAI] Initial partition (deterministic, shared with the greedy baseline):")
+    print(f"[MAPPO + Agentic AI Eval] loaded from {save_path}")
+    print("[AAI] Initial partition:")
     print_assignments(env)
+    print("=" * 100)
 
     def _nan_pt():
         return np.array([np.nan, np.nan])
@@ -52,9 +53,6 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True):
     uav_traj = {i: [env.uavs[i].pos2d.copy()] for i in range(NUM_UAVS)}
     tgt_traj = {k: [env.targets[k].pos.copy() if k in env.targets else _nan_pt()]
                 for k in range(MAX_TARGETS)}
-
-    print(f"[MAPPO + Agentic AI Eval] loaded from {save_path}")
-    print("=" * 100)
 
     ev_born:    list = []
     ev_rescued: list = []
@@ -64,13 +62,14 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True):
     delay_log       = []
     unassigned_log  = []
     mean_trace_log  = []
+    mean_pr_log     = []
     rmse_log        = []
-    pcrlb_log       = []
-    pcrlb_per_target_log = {k: [] for k in range(MAX_TARGETS)}
+    reward_log      = []
     trace_per_target_log = {k: [] for k in range(MAX_TARGETS)}
-    energy_log      = {i: [] for i in range(NUM_UAVS)}
     load_log        = {i: [] for i in range(NUM_UAVS)}
     assignment_log  = {i: [] for i in range(NUM_UAVS)}
+
+    from marl.reward import per_agent_rewards
 
     for t in range(T_SLOTS):
         born = apply_births(env, schedule) if births else []
@@ -82,11 +81,10 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True):
         state = env._system_state()
 
         # One call per slot. The detector runs inside it (deterministic, free);
-        # the LLM tiers are woken only when it alarms and only when the judge
-        # approves, and neither blocks this loop. `born` is passed explicitly
-        # because a birth is the one event the env's own info cannot report — it
-        # happens before the step, not inside it. Rescues come through `info`
-        # from the previous step.
+        # the LLM tiers wake only when it alarms and only when the judge approves,
+        # and neither blocks this loop. `born` is passed explicitly because a
+        # birth is the one event the env's own info cannot report — it happens
+        # before the step, not inside it.
         new_asgn = agentic.step(state, info if info is not None else {}, born=born)
 
         if new_asgn is not None:
@@ -108,15 +106,33 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True):
         for k, d in zip(info["rescued"], info["rescue_delays"]):
             ev_rescued.append((t + 1, k, d))
 
-        _log_slot(info, env, backlog_log, rescued_cum_log, delay_log,
-                  unassigned_log, mean_trace_log, pcrlb_log, rmse_log,
-                  pcrlb_per_target_log, trace_per_target_log, energy_log,
-                  load_log, assignment_log)
+        # ---- per-slot logging ----
+        backlog_log.append(info["backlog"])
+        rescued_cum_log.append(info["n_rescued_total"])
+        delay_log.append(info["avg_rescue_delay_s"])
+        unassigned_log.append(info["n_unassigned"])
+        reward_log.append(float(per_agent_rewards(info, env.uavs).sum()))
 
-        # Real-time pacing so the LLM tiers experience the mission's actual
-        # timescale: a judge/planner round trip that takes several seconds costs
-        # several slots of stale partition, exactly as it would in deployment.
-        time.sleep(DT)
+        tr = info["trace_pos_per_target"]
+        pr = info["rescue_prob"]
+        mean_trace_log.append(float(np.mean(list(tr.values()))) if tr else np.nan)
+        mean_pr_log.append(float(np.mean(list(pr.values()))) if pr else np.nan)
+        for k in range(MAX_TARGETS):
+            trace_per_target_log[k].append(tr.get(k, np.nan))
+        for i in range(NUM_UAVS):
+            load_log[i].append(info["load"][i])
+            row = np.zeros(MAX_TARGETS, dtype=np.int8)
+            for k in info["assignments"].get(i, ()):
+                if 0 <= k < MAX_TARGETS:
+                    row[k] = 1
+            assignment_log[i].append(row)
+
+        ekf_means = info["ekf_means"]
+        sq = [float(np.sum((ekf_means[k] - env.targets[k].pos) ** 2)) for k in ekf_means]
+        rmse_log.append(float(np.sqrt(np.mean(sq))) if sq else np.nan)
+
+        if realtime:
+            time.sleep(DT)
 
         for i in range(NUM_UAVS):
             uav_traj[i].append(env.uavs[i].pos2d.copy())
@@ -124,19 +140,54 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True):
             tgt_traj[k].append(env.targets[k].pos.copy() if k in env.targets else _nan_pt())
 
         if (t + 1) % 100 == 0:
-            print_slot(t, info, state)
+            print_slot(t, info)
             plot_trajectories(env, uav_traj, tgt_traj, plots_dir, t + 1)
 
-    res = _finish("agentic", env, plots_dir, backlog_log, rescued_cum_log, delay_log,
-                  unassigned_log, mean_trace_log, rmse_log, pcrlb_log,
-                  pcrlb_per_target_log, trace_per_target_log, energy_log, load_log,
-                  assignment_log, uav_traj, tgt_traj, ev_born, ev_rescued)
+    # ---- end of episode ----
+    plot_eval_rescue(backlog_log, rescued_cum_log, delay_log, unassigned_log, plots_dir)
+    plot_trajectories(env, uav_traj, tgt_traj, plots_dir, T_SLOTS)
+    print_assignments(env)
 
-    # ---- tier accounting ---------------------------------------------------
-    # The three numbers that justify the tiering: how many alarms the free
-    # detector raised, how many of those the cheap judge actually looked at, and
-    # how many reached the expensive planner. A judge that approved everything
-    # would show n_replans == n_judge_calls and would not be earning its place.
+    print("=" * 100)
+    print("MISSION RESULT")
+    print(f"  Targets appeared      : {env.n_born_total}")
+    print(f"  Targets rescued       : {len(env.rescue_delays)}")
+    print(f"  Still awaiting rescue : {len(env.targets)}")
+    print(f"  Avg rescue delay (Eq. 19, over all target-slots): "
+          f"{env.avg_rescue_delay:.2f} s")
+    print(f"  Mean delay of completed rescues                 : "
+          f"{env.mean_completed_delay:.2f} s")
+    print(f"  Mean backlog |K^t|    : {np.mean(backlog_log):.2f} "
+          f"(max {int(np.max(backlog_log))})")
+    print(f"  Mean tr(Sigma)        : {np.nanmean(mean_trace_log):.4g} m^2")
+    print(f"  Mean p_r              : {np.nanmean(mean_pr_log):.4f}")
+    print("=" * 100)
+
+    print_evolution_summary(ev_born, ev_rescued, final_targets=len(env.targets))
+
+    res = {
+        "backlog":              backlog_log,
+        "rescued_cum":          rescued_cum_log,
+        "delay":                delay_log,
+        "unassigned":           unassigned_log,
+        "mean_trace":           mean_trace_log,
+        "mean_pr":              mean_pr_log,
+        "rmse":                 rmse_log,
+        "reward":               reward_log,
+        "trace_per_target":     trace_per_target_log,
+        "load":                 load_log,
+        "assignments":          assignment_log,
+        "rescue_delays":        list(env.rescue_delays),
+        "birth_events":         [(s, k) for s, ids in ev_born for k in ids],
+        "rescue_events":        list(ev_rescued),
+        "avg_rescue_delay":     env.avg_rescue_delay,
+        "mean_completed_delay": env.mean_completed_delay,
+        "n_rescued":            len(env.rescue_delays),
+        "n_born":               env.n_born_total,
+    }
+
+    # Tier accounting: alarms -> judge calls -> planner calls. A judge that
+    # approved everything would show n_replans == n_judge_calls.
     ja_lat, pa_lat = agentic.ja_latencies, agentic.pa_latencies
     res["n_alarms"]      = agentic.n_alarms
     res["n_judge_calls"] = len(ja_lat)
@@ -152,10 +203,8 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True):
     print(f"  Re-partitions installed   : {len(agentic.log)}")
     if agentic.judge_log:
         from collections import Counter
-        verdicts = Counter(v["decision"] for v in agentic.judge_log)
-        regimes  = Counter(v["regime"]   for v in agentic.judge_log)
-        print(f"  Judge verdicts : {dict(verdicts)}")
-        print(f"  Regime reads   : {dict(regimes)}")
+        print(f"  Judge verdicts : {dict(Counter(v['decision'] for v in agentic.judge_log))}")
+        print(f"  Regime reads   : {dict(Counter(v['regime'] for v in agentic.judge_log))}")
     print("=" * 100)
 
     np.savez(os.path.join(plots_dir, "llm_latency.npz"),

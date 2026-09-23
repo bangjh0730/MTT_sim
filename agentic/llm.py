@@ -5,9 +5,9 @@ from google import genai
 from google.genai import types
 
 # Default model when a client doesn't specify one. Individual agents pick a model
-# suited to their reasoning load: the PA does multi-factor spatial/energy reasoning
-# over many UAV-target pairs and needs a stronger model; the MA does a cheap,
-# frequent yes/no coverage check and can use a lighter/faster one.
+# suited to their reasoning load: the planner reasons over the full per-target
+# geometry and needs a stronger model, while the judge reads only a digest and
+# can use a lighter, faster one.
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 
 

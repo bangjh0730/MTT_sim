@@ -1,42 +1,18 @@
-"""
-Planner Agent (PA) — tier 3. Heavier LLM, invoked only when the judge approves.
+"""Tier 3: planner. Heavier LLM, invoked only when the judge approves.
 
-Reads the full system state plus the judge's brief and emits a PARTITION of the
-live targets into per-UAV SETS.
+Reads full state plus the brief and emits a PARTITION of the live targets into
+per-UAV sets.
 
-What changed from the coverage-era planner, and why none of it could be kept
-----------------------------------------------------------------------------
-The old planner's entire objective was unsatisfiable here. It carried a hard
-constraint — "every live target must have a UAV assigned" — and minimised the time
-until ALL targets were being sensed. With 3 UAVs and 8+ targets there is no layout
-that senses everything, so the constraint rejects every candidate and the
-objective is a maximum over an always-infinite set. The hand-along chains, the
-"cover" inversion field and the all_sensed_after_s scoring were all machinery for
-that constraint, and they go with it.
+The objective is rescue delay under p_r = lambda/(lambda + tr Sigma), and the
+real decision is a rate-versus-breadth tradeoff: a small set is revisited often
+so its members clear fast, a large set spreads attention so every member is
+tracked but none is close to rescue. Neither dominates; which is right depends
+on the load regime, which arrives in the brief.
 
-The objective now is rescue delay under p_r = λ/(λ + tr Σ), and the real decision
-is a RATE-versus-BREADTH tradeoff that simply did not exist when every target had
-its own UAV:
-
-  * A small set is revisited often, so its members hold low tr(Σ), draw a high
-    rescue probability every slot, and clear FAST — which frees the UAV sooner,
-    compounding into the next targets.
-  * A large set spreads attention: every member gets some tracking, but each is
-    revisited rarely, tr(Σ) climbs between visits and p_r falls for all of them.
-
-Neither dominates. Concentrating drains the backlog fastest but leaves some
-targets untouched for long stretches; spreading keeps everything weakly tracked
-but may rescue nothing quickly. Which is right depends on the load regime, and
-that judgement arrives in the brief rather than being rediscovered here.
-
-Geometry matters through the SPREAD of a set, not the absolute position of its
-members. A UAV takes one measurement per slot and its policy parks it where it
-can serve the whole set, so a set whose members lie within about a sensing radius
-(~700 m) of a common point is refreshed every few slots from that one spot. A set
-spread wider than that admits no such spot: the UAV commutes, and every member
-decays during the flight. So a compact set of four can beat a scattered set of
-two. The distance table below is there for that comparison, not for a coverage
-race.
+Geometry enters through set SPREAD, not absolute position. A UAV senses one
+member per slot and parks where it can serve the whole set, so a set within
+about a sensing radius of a common point is refreshed every few slots, while a
+wider one forces a commute during which every member decays.
 """
 
 import re
@@ -134,18 +110,13 @@ class PlannerAgent:
             "",
             "UAVs:",
         ]
-        gamma_map = state.get("gamma", {})
         for i in range(NUM_UAVS):
             x, y, vx, vy = state["uavs"][i]
-            speed  = float(np.sqrt(vx**2 + vy**2))
-            rho    = float(state["rho"].get(i, 1.0))
-            cur    = sorted(state["assignments"].get(i, ()))
-            gamma = gamma_map.get(i)
-            snr_str = f"{10.0 * np.log10(gamma):.1f} dB" if gamma else "n/a"
+            speed = float(np.sqrt(vx**2 + vy**2))
+            cur   = sorted(state["assignments"].get(i, ()))
             lines.append(
                 f"  UAV {i}: pos=({x:.0f},{y:.0f}) m  vel=({vx:.1f},{vy:.1f}) m/s  "
-                f"speed={speed:.1f} m/s  uplinkSNR={snr_str}  energy={rho*100:.1f}%  "
-                f"currently holds {cur}"
+                f"speed={speed:.1f} m/s  currently holds {cur}"
             )
 
         lines += [

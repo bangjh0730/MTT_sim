@@ -1,57 +1,19 @@
-"""
-Judge Agent (JA) — tier 2. Light LLM, woken only when the detector alarms.
+"""Tier 2: judge. Light LLM, woken only when the detector alarms.
 
-The judge answers WHETHER a re-partition is worth doing now, and hands the planner
-a BRIEF characterising the situation. It never computes an assignment.
+Answers WHETHER a re-partition is worth doing and hands the planner a brief. It
+never computes an assignment.
 
-Why this tier exists at all
----------------------------
-The obvious alternative is a numeric trigger: fire the planner when some imbalance
-measure exceeds a threshold θ. That fails, and not for a tuning reason. Raw
-imbalance means OPPOSITE things in the two load regimes. Under heavy overload
-every UAV is saturated, so a large spread in per-UAV backlog is the correct
-equilibrium — moving a target from the worst UAV to the next-worst relocates the
-backlog without shrinking it, and firing is wasted work. Under light load the same
-spread means one UAV has slack while another is stretched, which is genuinely
-fixable. No single θ separates those, and hand-coding θ(load) just moves the
-arbitrariness into a second knob.
+A numeric threshold on imbalance cannot do this job: raw imbalance means
+opposite things in the two regimes. Under heavy overload a large spread is the
+correct equilibrium, since moving a target between two saturated UAVs relocates
+the backlog without shrinking it; under light load the same spread is genuinely
+fixable. What separates them is the marginal value of intervening, which the
+saturating rescue curve encodes for free.
 
-What actually distinguishes them is the MARGINAL VALUE of re-planning, and the
-rescue curve encodes it for free: because p_r = λ/(λ + tr Σ) saturates, its
-marginal return is steep at low tr(Σ) and flat at high tr(Σ). A UAV cycling a set
-of size m refreshes each member every ~m slots, so steady-state tr(Σ) grows with
-m, and shifting one target between two large sets barely moves total rescue rate
-(both sides sit on the flat tail) while the same shift between small sets moves it
-a lot. Regime-adaptivity is therefore a property of the system, not a threshold to
-tune — and judging it is a qualitative reading of load, uncertainty and what has
-changed, which is what an LLM is actually good at.
-
-Why the output is not a boolean
--------------------------------
-The judge's answer feeds the planner, so a bare yes/no throws away the most
-valuable thing the judge produced. It emits a brief with four parts:
-
-  regime   — overloaded vs manageable, and which way it is moving. Sets the
-             planner's emphasis: concentrate to drain fast under heavy load,
-             spread to keep more targets tracked as it eases.
-  focus    — which UAVs and targets are implicated. Under overload most of the
-             partition is fine; naming the locus lets the planner do a LOCAL
-             repartition instead of re-solving the whole map, which means a
-             smaller problem and far less gratuitous reshuffling.
-  changed  — the synthesised net effect of everything accumulated since the last
-             replan, not a raw event log. This synthesis across a burst of alarms
-             is real work and is the reason the tier is a model and not a rule.
-  preserve — the stable sets the planner should leave alone. Anti-oscillation
-             expressed as intent rather than hoped for.
-
-The line that keeps the two tiers non-redundant: the judge says WHERE and WHAT
-REGIME; the planner says the exact set membership. If the brief ever became
-prescriptive enough to be the answer, the tiers should be collapsed — the standing
-test is that the judge never needs the full per-target geometry table.
-
-It may also answer "not yet": with the tiers decoupled in time, deferring lets a
-burst settle so one considered replan lands over the settled state instead of four
-reactive ones.
+The output is a brief, not a boolean, because it feeds the planner: regime,
+locus, a synthesis of what changed, and which sets to leave alone. The line that
+keeps the tiers distinct is that the judge says WHERE and WHAT REGIME; the
+planner says the exact set membership.
 """
 
 import json

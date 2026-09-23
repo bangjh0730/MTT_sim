@@ -1,13 +1,18 @@
 import torch
 import torch.nn as nn
 
-ACT_DIM = 3  # (dvx, dvy, tau) — all squashed to [-1, 1] then scaled in env
+ACT_DIM = 2  # (dvx, dvy) — squashed to [-1, 1] then scaled to +/- V_MAX
 
 
 class MAPPOActor(nn.Module):
     """
-    Decentralized actor: maps local obs → (Δψ, Δv, τ) for one UAV.
+    Decentralized actor: maps local obs -> (dvx, dvy) for one UAV.
     All agents share this network (parameter sharing).
+
+    The action space is the velocity increment only. The ISAC sensing/comm split
+    is a fixed system parameter, not a control, and which set member to sense is
+    decided by the environment's scheduler -- so flying is the whole of the
+    policy's job.
     """
     def __init__(self, obs_dim: int, hidden: int = 256):
         super().__init__()

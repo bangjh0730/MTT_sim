@@ -1,37 +1,19 @@
-"""
-LangGraph graph connecting the three assignment tiers.
+"""Three-tier assignment stack.
 
-  detector ──[alarm?]──► judge ──[replan?]──► planner ──► END
-      NO ────────────────► END      NO ──────────────────► END
+  detector --[alarm?]--> judge --[replan?]--> planner --> END
 
-Three tiers, each rarer and heavier than the one before it:
+  DETECTOR  deterministic, every slot, free.
+  JUDGE     light LLM on an alarm; reads the digest, returns a scoping brief.
+  PLANNER   heavy LLM on approval; reads full state, emits the sets.
 
-  DETECTOR  deterministic, every slot, free. Raises an alarm on birth / rescue /
-            UAV-loss, plus a periodic backstop tick, and keeps a running digest.
-  JUDGE     light LLM, only on an alarm. Reads the DIGEST — coarse load stats and
-            event attribution, not the per-target table — and answers whether a
-            re-partition is worth doing, returning a brief that scopes it.
-  PLANNER   heavy LLM, only on the judge's approval. Reads FULL state plus the
-            brief and emits the assignment sets.
+The tiers are decoupled in time. A burst of events raises several alarms, but
+the judge holds the accumulated digest across them and can approve a single
+replan over the settled state instead of thrashing the partition. That is also
+what separates this from a react-to-every-trigger baseline: there a trigger IS a
+reallocation, here it is an observation a reasoning step may decline to act on.
 
-Why the tiers are decoupled in time
------------------------------------
-The detector is chatty by nature: a burst of three rescues and a birth inside ten
-slots raises four alarms. If each alarm ran a planner, the partition would be
-re-solved four times over a situation that is still moving, and the sets would
-oscillate. Because the judge holds the accumulated event digest ACROSS alarms
-rather than running synchronously per event, it can let a burst settle and approve
-a single replan over the settled state. The judge is therefore a debouncer between
-a cheap detector and an expensive planner — which is only possible because the
-tiers do not have to fire together.
-
-This is also what separates the design from a react-to-every-trigger baseline:
-there, a trigger IS a reallocation. Here a trigger is an observation, and a
-separate reasoning step decides whether the event merits acting on at all.
-
-Scheduling (non-blocking): the simulation never waits for an LLM. The judge →
-planner round trip runs in a daemon thread, and its result is picked up whenever
-it lands.
+Non-blocking: the judge/planner round trip runs in a daemon thread and the
+simulation never waits for it.
 """
 
 import threading

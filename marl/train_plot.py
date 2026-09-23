@@ -46,11 +46,10 @@ def plot_training_curves(
     plt.close(fig)
 
     # ── 2. Average rescue delay ──────────────────────────────────────────────
-    # The mission objective D-bar (Eq. 19) replaces PCRLB here: PCRLB measured
-    # tracking accuracy under guaranteed coverage, which no longer exists — with
-    # |K| > |U| most targets are unsensed in any given slot by construction, so a
-    # coverage-era accuracy average says little about whether the fleet is
-    # actually clearing its backlog.
+    # The mission objective itself: D-bar of Eq. (19), in seconds. Tracking
+    # accuracy is not plotted, because with |K| > |U| most targets are unsensed
+    # in any given slot by construction, so an accuracy average says little about
+    # whether the fleet is actually clearing its backlog.
     fig, ax = plt.subplots(figsize=(10, 4))
     delay = np.asarray(delay_hist, dtype=np.float64)
     ax.plot(episodes, delay, color="darkorange", alpha=0.25, lw=0.6, label="Raw")

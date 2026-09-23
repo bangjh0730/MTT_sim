@@ -3,7 +3,7 @@ import time
 import numpy as np
 import torch
 
-from config.params import NUM_UAVS, NUM_TARGETS, V_MAX, DT
+from config.params import NUM_UAVS, NUM_TARGETS, V_MAX
 from marl.actor_critic import MAPPOActor, CentralizedCritic
 from marl.preprocess   import local_obs, global_state, OBS_DIM, GLOBAL_OBS_DIM
 from marl.reward       import per_agent_rewards
@@ -48,7 +48,7 @@ class MAPPO:
         gamma:      float = 0.99,
         gae_lambda: float = 0.95,
         eps_clip:   float = 0.2,
-        k_epochs:   int   = 4,
+        k_epochs:   int   = 15,   # Table II
         lr_actor:   float = 3e-4,
         lr_critic:  float = 3e-4,
         entropy_c:  float = 0.01,
@@ -105,7 +105,7 @@ class MAPPO:
         Pass info=None for the very first slot (after reset).
         Pass deterministic=True during eval to use mean actions (no sampling noise).
 
-        Returns env-compatible actions: {uav_id: (dvx, dvy, tau)}.
+        Returns env-compatible actions: {uav_id: (dvx, dvy)}.
         Stores (obs, action, logprob, value) in the buffer.
         """
         all_l_obs_np = np.stack([local_obs(state, i, info) for i in range(self.num_uavs)])
@@ -132,15 +132,13 @@ class MAPPO:
             self.buffer.logprobs.append(logprob_arr)
             self.buffer.values.append(value)
 
-        # Scale tanh output [-1, 1] → env units.
+        # Scale tanh output [-1, 1] -> env units. The resulting speed is clamped
+        # to V_MAX inside UAV.step, so constraint (20a) always holds.
         env_actions = {}
         for i in range(self.num_uavs):
             a = action_arr[i]
-            env_actions[i] = (
-                float(a[0]) * V_MAX,              # dvx ∈ [-V_MAX, V_MAX]
-                float(a[1]) * V_MAX,              # dvy ∈ [-V_MAX, V_MAX]
-                float((a[2] + 1.0) / 2.0) * DT,  # τ ∈ [0, DT]
-            )
+            env_actions[i] = (float(a[0]) * V_MAX,    # dvx in [-V_MAX, V_MAX]
+                              float(a[1]) * V_MAX)    # dvy in [-V_MAX, V_MAX]
         return env_actions
 
     def store_outcome(self, rewards: np.ndarray, done: bool):
@@ -302,84 +300,54 @@ class MAPPO:
 
 
 # ---------------------------------------------------------------------------
-# Slots between training-time re-partitions of the assignment sets (mean of an
-# exponential draw, so the policy never sees a fixed re-partition rhythm).
-_TRAIN_REPARTITION_MEAN = 60
+# Live targets per training episode, drawn per episode. With 3 UAVs this spans
+# ~1.3 to ~3.7 per UAV. The ceiling sits just above the observation padding
+# (M = NUM_TARGETS) so sets rarely overflow it; overflow still reaches the actor
+# through the set summary, but loses individual member positions.
+TRAIN_POPULATION = (4, 11)
 
 
-def _random_partition(env, rng) -> None:
-    """Re-partition the live targets across the UAVs at random — TRAINING ONLY.
+def _set_population(env, n_pop: int) -> None:
+    """Bring the live-target count to n_pop at episode start."""
+    for k in sorted(env.targets)[n_pop:]:
+        env.remove_target(k)
+        env.n_born_total -= 1
+    while len(env.targets) < n_pop:
+        if env.spawn_target() is None:
+            break
 
-    This is domain randomisation over the ASSIGNMENT, and it is here because of
-    an asymmetry between training and deployment: at evaluation the partitions
-    come from the LLM planner, which is deliberately not in the training loop, so
-    the policy must be robust to whatever partition it is handed rather than tuned
-    to the one heuristic that generated its training data. A policy trained only
-    on balanced, spatially-tidy sets would meet its first spread-out or lopsided
-    set at evaluation and have no idea what to do with it.
 
-    Three shapes are drawn, spanning what a planner plausibly emits:
-      * CLUSTERED  — each target to its nearest UAV. Spatially coherent sets,
-                     the easy case, and the one a good planner aims for.
-      * BALANCED   — equal-sized sets with random membership. Set members can be
-                     anywhere, so the UAV must find a compromise vantage point.
-      * LOPSIDED   — most of the backlog on one UAV, the rest nearly idle. This
-                     is the overload case, and it also trains the empty-set
-                     behaviour that a UAV needs when the planner leaves it free.
-
-    Targets are occasionally left unassigned, because the planner is explicitly
-    allowed to do that under saturation and the resulting state must not be
-    out-of-distribution for the critic.
-    """
-    live = sorted(env.targets)
-    if not live:
-        return
-    uav_ids = sorted(env.uavs)
-
-    # Leave a few targets to nobody now and then (never on the clustered draw,
-    # which is meant to be the clean case).
-    shape = rng.choice(["clustered", "balanced", "lopsided"], p=[0.4, 0.35, 0.25])
-    if shape != "clustered" and rng.random() < 0.25 and len(live) > len(uav_ids):
-        n_drop = rng.integers(1, max(2, len(live) // 4))
-        live = list(rng.permutation(live))[n_drop:]
-
-    table = {i: set() for i in uav_ids}
-    if shape == "clustered":
-        for k in live:
-            mu = env.ekf_state[k][0][:2]
-            i = min(uav_ids, key=lambda i: float(((env.uavs[i].pos2d - mu) ** 2).sum()))
-            table[i].add(k)
-    elif shape == "balanced":
-        for n, k in enumerate(rng.permutation(live)):
-            table[uav_ids[n % len(uav_ids)]].add(int(k))
-    else:  # lopsided
-        heavy = uav_ids[int(rng.integers(0, len(uav_ids)))]
-        for k in live:
-            i = heavy if rng.random() < 0.7 else uav_ids[int(rng.integers(0, len(uav_ids)))]
-            table[i].add(int(k))
-
-    env.apply_assignments(table)
+def _replenish(env, n_pop: int) -> list:
+    """Refill to the episode's population; the ids returned are ordinary births."""
+    born = []
+    while len(env.targets) < n_pop:
+        k = env.spawn_target()
+        if k is None:
+            break
+        born.append(k)
+    return born
 
 
 def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./results"):
-    """Training loop implementing the Dec-POMDP training procedure.
+    """Dec-POMDP training loop. No LLM.
 
-    Targets are BORN and RESCUED during training, exactly as in evaluation, and
-    both matter for what the actor learns. Rescue is what makes a set shrink and
-    a UAV's job change mid-episode; births are what keep the map from draining
-    empty within ~150 slots and leaving the rest of the episode teaching nothing.
-    Because rescue depends on the tracking quality the policy itself achieves,
-    training is a genuine closed loop: fly well, clear the set, get a new one.
+    Assignment sets come from TrainingPartitioner, a geometric surrogate for the
+    allocator, randomised over style, reachability, size skew and untidiness so
+    the actor stays neutral about who forms the sets.
 
-    No LLM is involved. The assignment sets come from a naive placement for new
-    targets plus periodic RANDOM re-partitioning (see _random_partition), which
-    is what keeps the policy from co-adapting to any particular allocation style.
+    Arrivals are NOT the evaluation birth process: training holds a fixed
+    live-target population per episode, replenishing on rescue. The evaluation
+    queue's length depends on how well the fleet flies, so no single birth rate
+    works across training - a rate that keeps a random policy out of saturation
+    leaves a competent one with 84% empty sets, and vice versa. Holding the
+    population fixed keeps the distribution of set sizes the same in episode 1
+    and episode 20,000. Rescue still runs, so the loop is genuinely closed.
     """
-    from envs.schedule import DisturbanceSchedule
-    from envs.births   import apply_births
+    from marl.partitioner import TrainingPartitioner
 
     agent = MAPPO()
     rng   = np.random.default_rng()
+    part  = TrainingPartitioner(rng)
 
     reward_hist        = []
     backlog_hist       = []     # mean |K^t| over the episode
@@ -395,31 +363,21 @@ def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./res
         ep_reward = 0.0
         ep_backlog = []
 
-        # A fresh birth schedule per episode; drawn up front so an episode's
-        # arrival pattern is fixed before the policy touches it.
-        schedule = DisturbanceSchedule(int(rng.integers(1 << 31)), env.T)
-        next_repartition = int(rng.exponential(_TRAIN_REPARTITION_MEAN))
+        # This episode's live-target population, ~1.3 to ~3.7 per UAV.
+        n_pop = int(rng.integers(TRAIN_POPULATION[0], TRAIN_POPULATION[1] + 1))
+        _set_population(env, n_pop)
+
+        # Draws this episode's partition style and lays down the opening sets.
+        part.reset(env)
+        state = env._system_state()
 
         for t in range(env.T):
-            born = apply_births(env, schedule)
-            dirty = False
-
-            if born:
-                # Naive placement: least-loaded UAV takes the newcomer. The
-                # random re-partition below is what supplies variety; this only
-                # has to keep new targets from sitting unassigned by default.
-                table = env.assignment_table()
-                i = min(table, key=lambda i: (len(table[i]), i))
-                table[i] |= set(born)
-                env.apply_assignments(table)
-                dirty = True
-
-            if t >= next_repartition:
-                _random_partition(env, rng)
-                next_repartition = t + 1 + int(rng.exponential(_TRAIN_REPARTITION_MEAN))
-                dirty = True
-
-            if dirty:
+            born     = _replenish(env, n_pop)
+            rescued  = info["rescued"] if info is not None else []
+            # Birth / rescue / hold-timer triggers. Between them the partition is
+            # held while targets and UAVs drift, and serving that staleness is
+            # most of what the actor is learning.
+            if part.update(env, born=born, rescued=rescued):
                 state = env._system_state()
 
             actions     = agent.select_actions(state, info)
