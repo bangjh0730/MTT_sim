@@ -285,7 +285,7 @@ class MTTEnv:
         backlog_before = len(self.targets)
         self.backlog_sum += backlog_before
 
-        trace_pos = {k: float(np.trace(self.ekf_state[k][1][:2, :2])) for k in self.targets}
+        trace_pos = {k: float((self.ekf_state[k][1][0, 0] + self.ekf_state[k][1][1, 1])) for k in self.targets}
         pr_now    = {k: rescue_prob(v) for k, v in trace_pos.items()}
         pr_prev   = {k: self._prev_pr.get(k, pr_now[k]) for k in self.targets}
         sets_pre  = {i: sorted(self.uavs[i].assignment_set) for i in self.uavs}
@@ -341,7 +341,7 @@ class MTTEnv:
             "set_snr":     {i: dict(v) for i, v in getattr(self, "_set_snr_cache", {}).items()},
             "targets": {k: (self.ekf_state[k][0].copy(), self.ekf_state[k][1].copy())
                         for k in self.targets},
-            "rescue_prob": {k: rescue_prob(float(np.trace(self.ekf_state[k][1][:2, :2])))
+            "rescue_prob": {k: rescue_prob(float((self.ekf_state[k][1][0, 0] + self.ekf_state[k][1][1, 1])))
                             for k in self.targets},
             "time_since_sensed": {k: self.t - self.targets[k].last_sensed_slot
                                   for k in self.targets},

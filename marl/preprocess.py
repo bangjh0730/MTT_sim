@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from config.params import (MAP_SIZE, V_MAX, V_MAX_TARGET, NUM_UAVS,
                            SIGMA_FEATURE, LAMBDA_RESCUE,
@@ -34,10 +35,17 @@ R_DETECT_2   = max(_R_SLANT_DET ** 2 - H ** 2, 0.0)
 
 def _sigma_scalar(Sigma) -> float:
     """Per-target uncertainty scalar of Eq. (24), normalised to [0, 1]."""
-    tr = float(np.trace(Sigma[:2, :2]))
+    tr = float(Sigma[0, 0] + Sigma[1, 1])
     if SIGMA_FEATURE == "log":
-        return float(np.clip(1.0 - (np.log10(max(tr, 1e-4)) + 4.0) / 10.0, 0.0, 1.0))
-    return float(LAMBDA_RESCUE / (LAMBDA_RESCUE + max(tr, 0.0)))
+        return min(max(1.0 - (math.log10(max(tr, 1e-4)) + 4.0) / 10.0, 0.0), 1.0)
+    return LAMBDA_RESCUE / (LAMBDA_RESCUE + max(tr, 0.0))
+
+
+def _sigma_vec(tr: np.ndarray) -> np.ndarray:
+    """_sigma_scalar over an array of tr(Sigma_pos)."""
+    if SIGMA_FEATURE == "log":
+        return np.clip(1.0 - (np.log10(np.maximum(tr, 1e-4)) + 4.0) / 10.0, 0.0, 1.0)
+    return LAMBDA_RESCUE / (LAMBDA_RESCUE + np.maximum(tr, 0.0))
 
 
 def _members_by_distance(state: dict, uav_id: int, x: float, y: float) -> list:
@@ -75,8 +83,70 @@ def local_obs(state: dict, uav_id: int, info: dict = None):
     return _ego(state, uav_id), mem, ids
 
 
+def critic_obs_all(state: dict, uav_ids) -> tuple:
+    """critic_obs for every agent at once: (selfs, uavs, targets), each a list
+    over uav_ids. The target table is built once and only the self-relative
+    columns differ per agent, so the per-target Python loop runs once a slot
+    instead of once per agent."""
+    uids = sorted(state["uavs"])
+    upos = np.array([state["uavs"][j] for j in uids], dtype=float).reshape(-1, 4)
+    nset = np.array([len(state["assignments"].get(j, ()) or ()) for j in uids], dtype=float)
+
+    ks = sorted(state["targets"])
+    K  = len(ks)
+    holder = {}
+    for i in uids:
+        for k in state["assignments"].get(i, ()) or ():
+            holder[k] = i
+
+    if K:
+        mu  = np.array([state["targets"][k][0] for k in ks], dtype=float)
+        sig = _sigma_vec(np.array([state["targets"][k][1][0, 0] + state["targets"][k][1][1, 1]
+                                   for k in ks]))
+        h   = np.array([holder.get(k, -1) for k in ks])
+        row_of = {j: r for r, j in enumerate(uids)}
+        hpos = np.array([upos[row_of[x], :2] if x >= 0 else (0.0, 0.0) for x in h]).reshape(K, 2)
+        dh2  = ((mu[:, :2] - hpos) ** 2).sum(1)
+        held = h >= 0
+        dh     = np.where(held, np.sqrt(dh2) / MAP_SIZE, 0.0)
+        in_rng = np.where(held & (dh2 <= R_DETECT_2), 1.0, 0.0)
+        base = np.zeros((K, T_DIM))
+        base[:, 2] = mu[:, 0] / MAP_SIZE
+        base[:, 3] = mu[:, 1] / MAP_SIZE
+        base[:, 4] = mu[:, 2] / V_MAX_TARGET
+        base[:, 5] = mu[:, 3] / V_MAX_TARGET
+        base[:, 6] = sig
+        base[:, 9]  = np.where(held, 0.0, 1.0)
+        base[:, 10] = dh
+        base[:, 11] = in_rng
+
+    selfs, uav_sets, tgt_sets = [], [], []
+    for i in uav_ids:
+        x, y = state["uavs"][i][:2]
+        selfs.append(_ego(state, i))
+        u = np.zeros((len(uids), U_DIM))
+        u[:, 0] = (upos[:, 0] - x) / MAP_SIZE
+        u[:, 1] = (upos[:, 1] - y) / MAP_SIZE
+        u[:, 2] = upos[:, 2] / V_MAX
+        u[:, 3] = upos[:, 3] / V_MAX
+        u[:, 4] = nset / SET_SCALE
+        u[:, 5] = [1.0 if j == i else 0.0 for j in uids]
+        uav_sets.append(u.astype(np.float32))
+        if K:
+            t = base.copy()
+            t[:, 0] = (mu[:, 0] - x) / MAP_SIZE
+            t[:, 1] = (mu[:, 1] - y) / MAP_SIZE
+            t[:, 7] = (h == i)
+            t[:, 8] = held & (h != i)
+            tgt_sets.append(t.astype(np.float32))
+        else:
+            tgt_sets.append(np.zeros((0, T_DIM), dtype=np.float32))
+    return selfs, uav_sets, tgt_sets
+
+
 def critic_obs(state: dict, uav_id: int):
-    """Returns (self [EGO_DIM], uavs [|U|, U_DIM], targets [|K|, T_DIM])."""
+    """Returns (self [EGO_DIM], uavs [|U|, U_DIM], targets [|K|, T_DIM]).
+    Reference form of critic_obs_all for one agent."""
     x, y = state["uavs"][uav_id][:2]
 
     holder = {}

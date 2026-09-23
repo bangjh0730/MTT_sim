@@ -24,7 +24,7 @@ def apply_rescues(env):
     """
     rescued = []
     for k in sorted(env.targets):
-        tr_pos = float(np.trace(env.ekf_state[k][1][:2, :2]))
+        tr_pos = float((env.ekf_state[k][1][0, 0] + env.ekf_state[k][1][1, 1]))
         if env._rescue_rngs[k].random() < rescue_prob(tr_pos):
             tgt = env.targets[k]
             tgt.rescued     = True

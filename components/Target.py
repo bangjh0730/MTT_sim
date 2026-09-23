@@ -57,4 +57,4 @@ class Target:
                 elif self.state[d] > hi:
                     self.state[d] = 2 * hi - self.state[d]
                     self.state[d + 2] *= -1
-                self.state[d] = np.clip(self.state[d], lo, hi)
+                self.state[d] = min(max(self.state[d], lo), hi)

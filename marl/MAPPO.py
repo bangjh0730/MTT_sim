@@ -5,7 +5,7 @@ import torch
 
 from config.params import NUM_UAVS, NUM_TARGETS, V_MAX
 from marl.actor_critic import MAPPOActor, CentralizedCritic
-from marl.preprocess   import (local_obs, critic_obs, pad_sets,
+from marl.preprocess   import (local_obs, critic_obs_all, pad_sets,
                                EGO_DIM, MEM_DIM, U_DIM, T_DIM)
 from marl.reward       import per_agent_rewards
 from marl.train_plot   import plot_training_curves
@@ -85,6 +85,10 @@ class MAPPO:
         # faster on the CPU, so it uses CPU copies synced after every update.
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.cpu    = torch.device("cpu")
+        if self.device.type == "cuda":
+            # CPU torch then only serves batch-of-|U| inference, where thread
+            # start-up costs more than it saves (~30% slower per slot).
+            torch.set_num_threads(1)
 
         self.actor  = MAPPOActor(EGO_DIM, MEM_DIM).to(self.device)
         self.critic = CentralizedCritic(EGO_DIM, U_DIM, T_DIM).to(self.device)
@@ -128,7 +132,7 @@ class MAPPO:
                 self._t(tm, torch.bool, device=device))
 
     def _critic_obs_all(self, state):
-        return list(zip(*[critic_obs(state, i) for i in range(self.num_uavs)]))
+        return critic_obs_all(state, range(self.num_uavs))
 
     def _values(self, c_ego, c_uav, c_tgt) -> np.ndarray:
         """Per-agent V_i(S^t) in reward units, (N,)."""
