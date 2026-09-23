@@ -63,6 +63,7 @@ class MAPPO:
         lr_critic:  float = 3e-4,
         entropy_c:  float = 0.01,
         update_every_episodes: int = 10,
+        row_budget: int = 1 << 18,
     ):
         self.num_uavs   = num_uavs
         self.gamma      = gamma
@@ -74,7 +75,12 @@ class MAPPO:
         self.update_every_episodes = update_every_episodes
         self.episode_count = 0
 
-        # The PPO update (full batch over ~15k samples with padded sets) runs on
+        # Peak-memory bound for the update: a chunk holds at most row_budget
+        # padded set rows (samples x largest set in the chunk). The live-target
+        # count is not bounded, so neither is a full-batch forward.
+        self.row_budget = row_budget
+
+        # The PPO update (~15k samples with padded sets, chunked) runs on
         # the GPU when there is one; rollout inference is a batch of |U| and is
         # faster on the CPU, so it uses CPU copies synced after every update.
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -230,11 +236,11 @@ class MAPPO:
             return self.last_actor_loss, self.last_critic_loss
 
         cat = lambda key: [x for ep in self._accum for x in ep[key]]
-        actor_in  = self._actor_batch(cat("ego"), cat("mem"))
-        critic_in = self._critic_batch(cat("c_ego"), cat("c_uav"), cat("c_tgt"))
-        raw_t     = self._t(np.stack(cat("raw")))
-        idx_t     = self._t(np.array(cat("idx")), torch.long)
-        old_lp    = self._t(np.array(cat("logprobs")))
+        ego, mem = cat("ego"), cat("mem")
+        c_ego, c_uav, c_tgt = cat("c_ego"), cat("c_uav"), cat("c_tgt")
+        raw    = np.stack(cat("raw"))
+        idx    = np.array(cat("idx"))
+        old_lp = np.array(cat("logprobs"), dtype=np.float32)
         flat_adv     = np.concatenate([ep["adv"] for ep in self._accum])
         flat_returns = np.concatenate([ep["ret"] for ep in self._accum])
         self._accum = []
@@ -259,38 +265,72 @@ class MAPPO:
         self.count   += batch_count
 
         # Normalize target returns to a stable range
-        returns_t = self._t((flat_returns - self.ret_mean) / (np.sqrt(self.ret_var) + 1e-8))
+        norm_ret = (flat_returns - self.ret_mean) / (np.sqrt(self.ret_var) + 1e-8)
 
         # Normalize advantages
-        adv_t = self._t((flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8))
+        norm_adv = (flat_adv - flat_adv.mean()) / (flat_adv.std() + 1e-8)
+
+        # ---- Chunks ---------------------------------------------------------
+        # Samples sorted by target-set size so each chunk pads little, then cut
+        # so no chunk exceeds row_budget padded rows. Tensors are built once.
+        n_total = len(norm_adv)
+        chunks, cur, cur_max = [], [], 1
+        for j in np.argsort([len(t) for t in c_tgt], kind="stable"):
+            m = max(cur_max, len(c_tgt[j]), 1)
+            if cur and m * (len(cur) + 1) > self.row_budget:
+                chunks.append(cur)
+                cur, m = [], max(len(c_tgt[j]), 1)
+            cur.append(int(j)); cur_max = m
+        if cur:
+            chunks.append(cur)
+
+        batches = []
+        for ch in chunks:
+            batches.append((
+                self._actor_batch([ego[j] for j in ch], [mem[j] for j in ch]),
+                self._critic_batch([c_ego[j] for j in ch], [c_uav[j] for j in ch],
+                                   [c_tgt[j] for j in ch]),
+                self._t(raw[ch]), self._t(idx[ch], torch.long), self._t(old_lp[ch]),
+                self._t(norm_adv[ch]), self._t(norm_ret[ch]),
+            ))
 
         # ---- PPO epochs -----------------------------------------------------
+        # One optimizer step per epoch over the whole batch, as before; the
+        # gradient is accumulated chunk by chunk (sum-reduced losses / n_total),
+        # which equals the full-batch mean-loss gradient.
         for _ in range(self.k_epochs):
-            logprobs, entropy = self.actor.evaluate(*actor_in, raw_t, idx_t)
-
-            ratios = torch.exp((logprobs - old_lp).clamp(-10.0, 10.0))
-
-            surr1 = ratios * adv_t
-            surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * adv_t
-            actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_c * entropy.mean()
-
-            # The critic network now attempts to predict normalized target scales
-            values      = self.critic(*critic_in)
-            critic_loss = torch.nn.functional.huber_loss(values, returns_t, delta=1.0)
-
             self.actor_optim.zero_grad()
-            actor_loss.backward()
+            self.critic_optim.zero_grad()
+            actor_loss = critic_loss = 0.0
+
+            for actor_in, critic_in, raw_t, idx_t, old_lp_t, adv_t, ret_t in batches:
+                logprobs, entropy = self.actor.evaluate(*actor_in, raw_t, idx_t)
+
+                ratios = torch.exp((logprobs - old_lp_t).clamp(-10.0, 10.0))
+
+                surr1 = ratios * adv_t
+                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * adv_t
+                a_loss = (-torch.min(surr1, surr2).sum()
+                          - self.entropy_c * entropy.sum()) / n_total
+                a_loss.backward()
+
+                # The critic network now attempts to predict normalized target scales
+                values = self.critic(*critic_in)
+                c_loss = torch.nn.functional.huber_loss(
+                    values, ret_t, delta=1.0, reduction="sum") / n_total
+                c_loss.backward()
+
+                actor_loss  += float(a_loss.item())
+                critic_loss += float(c_loss.item())
+
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
             self.actor_optim.step()
-
-            self.critic_optim.zero_grad()
-            critic_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
             self.critic_optim.step()
 
         self._sync_cpu()
-        self.last_actor_loss  = float(actor_loss.item())
-        self.last_critic_loss = float(critic_loss.item())
+        self.last_actor_loss  = actor_loss
+        self.last_critic_loss = critic_loss
         return self.last_actor_loss, self.last_critic_loss
 
     # ------------------------------------------------------------------ I/O
