@@ -4,7 +4,7 @@ from config.params import P_BIRTH, MAP_SIZE, V_MAX_TARGET
 
 
 class DisturbanceSchedule:
-    """Pre-drawn target arrivals for one evaluation episode.
+    """Pre-drawn target arrivals for one episode (training and evaluation).
 
     Births are drawn up front from the seed so the arriving load is identical
     across runs regardless of policy. Rescues are NOT scheduled: they depend on

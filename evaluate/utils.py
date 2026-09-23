@@ -15,7 +15,7 @@ def save_raw_eval(seed: int, mode: str, res: dict) -> str:
     Persist one run's series to plots/seed{N}/{mode}/raw_eval.npz.
 
     backlog is the objective: sum_t |K^t| is the total slots targets spend
-    awaiting rescue (Eq. 19). assignments is (U, T, MAX_TARGETS) multi-hot,
+    awaiting rescue (Eq. 19). assignments is (U, T, n_ids) multi-hot,
     since a UAV holds a set.
     """
     d = os.path.join(seed_plots_dir(seed), mode)

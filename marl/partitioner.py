@@ -16,13 +16,25 @@ import itertools
 import numpy as np
 
 from config.params import V_MAX, DT
+from marl.preprocess import R_DETECT_2
 
 # One-way flight budget in slots for a UAV holding a SINGLE target, drawn per
 # episode. The affordable radius divides this by the holder's load (see
-# _affordable_radius): rescue rate per member falls faster than 1/m, measured
-# .058 / .020 / .011 / .008 / .004 for sets of 1-5, so a loaded UAV cannot
-# afford a detour that a light one can.
+# _affordable_radius): a UAV senses one member per slot, so every member it
+# adds dilutes the others, and a loaded UAV cannot afford a detour that a light
+# one can.
 _FLIGHT_BUDGET_SLOTS = (20, 96)
+
+_R_DETECT = float(np.sqrt(R_DETECT_2))
+
+
+def _travel(uav, p) -> float:
+    """Flight needed to bring p into the detection footprint: the distance
+    beyond the footprint radius, not the distance to p itself. With a ~660 m
+    footprint most of the map is sensable from a central position, so charging
+    the full distance would make the reach budget refuse targets that need
+    little or no flight."""
+    return max(0.0, float(np.linalg.norm(uav.pos2d - p)) - _R_DETECT)
 
 _HOLD_SLOTS = (8, 120)      # partition lifetime between timer-driven re-solves
 
@@ -159,7 +171,8 @@ class TrainingPartitioner:
 
     # ------------------------------------------------------------------
     def _affordable_radius(self, load: int) -> float:
-        """How far this UAV can afford to fly given what it already holds.
+        """How far this UAV can afford to fly (beyond its footprint) given
+        what it already holds.
 
         Adding a member at distance d lengthens the tour by ~2d, paid by every
         other member, so the affordable radius scales inversely with load. This
@@ -182,11 +195,10 @@ class TrainingPartitioner:
             moved = False
             for i in uav_ids:
                 for k in list(sets[i]):
-                    d = float(np.linalg.norm(env.uavs[i].pos2d - pos[k]))
-                    if d <= self._affordable_radius(len(sets[i])):
+                    if _travel(env.uavs[i], pos[k]) <= self._affordable_radius(len(sets[i])):
                         continue
                     cand = [j for j in uav_ids if j != i
-                            and float(np.linalg.norm(env.uavs[j].pos2d - pos[k]))
+                            and _travel(env.uavs[j], pos[k])
                             <= self._affordable_radius(len(sets[j]) + 1)]
                     if cand:
                         j = min(cand, key=lambda j: (
@@ -230,8 +242,7 @@ class TrainingPartitioner:
             return
 
         def reachable(i, k):
-            return (float(np.linalg.norm(env.uavs[i].pos2d - pos[k]))
-                    <= self._affordable_radius(len(sets[i]) + 1))
+            return _travel(env.uavs[i], pos[k]) <= self._affordable_radius(len(sets[i]) + 1)
 
         n_live = sum(len(s) for s in sets.values())
         if self.skew == "balanced":
@@ -272,8 +283,7 @@ class TrainingPartitioner:
         for k in self.rng.permutation(allk)[:n]:
             k = int(k)
             cand = [i for i in uav_ids
-                    if float(np.linalg.norm(env.uavs[i].pos2d - pos[k]))
-                    <= self._affordable_radius(len(sets[i]) + 1)]
+                    if _travel(env.uavs[i], pos[k]) <= self._affordable_radius(len(sets[i]) + 1)]
             if not cand:
                 continue
             dst = int(cand[self.rng.integers(0, len(cand))])
@@ -289,8 +299,7 @@ class TrainingPartitioner:
                 continue
             p = env.ekf_state[k][0][:2]
             cand = [i for i in table
-                    if float(np.linalg.norm(env.uavs[i].pos2d - p))
-                    <= self._affordable_radius(len(table[i]) + 1)]
+                    if _travel(env.uavs[i], p) <= self._affordable_radius(len(table[i]) + 1)]
             pool = cand or list(table)
             i = min(pool, key=lambda i: (float(np.linalg.norm(env.uavs[i].pos2d - p)),
                                          len(table[i])))
@@ -311,8 +320,7 @@ class TrainingPartitioner:
                 break
             budget = self._affordable_radius(len(table[light]) + 1)
             cand = [k for k in table[heavy] if k in env.targets and
-                    float(np.linalg.norm(env.uavs[light].pos2d
-                                         - env.ekf_state[k][0][:2])) <= budget]
+                    _travel(env.uavs[light], env.ekf_state[k][0][:2]) <= budget]
             if not cand:
                 break
             k = min(cand, key=lambda k: float(

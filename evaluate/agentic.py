@@ -2,7 +2,7 @@ import os
 import time
 import numpy as np
 
-from config.params  import T_SLOTS, NUM_UAVS, MAX_TARGETS, DT
+from config.params  import T_SLOTS, NUM_UAVS, DT
 from evaluate.plot  import plot_trajectories, plot_eval_rescue
 from evaluate.utils import (print_slot, print_assignments, seed_plots_dir,
                             print_evolution_summary)
@@ -51,8 +51,21 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True,
         return np.array([np.nan, np.nan])
 
     uav_traj = {i: [env.uavs[i].pos2d.copy()] for i in range(NUM_UAVS)}
-    tgt_traj = {k: [env.targets[k].pos.copy() if k in env.targets else _nan_pt()]
-                for k in range(MAX_TARGETS)}
+    tgt_traj: dict = {}
+
+    # Per-id logs grow with the id space: there is no cap on live targets, and
+    # ids are always the lowest free one, so keys stay contiguous from 0.
+    trace_per_target_log: dict = {}
+
+    def _grow_ids(n_ids: int, n_slots: int) -> None:
+        for k in range(len(tgt_traj), n_ids):
+            tgt_traj[k] = [_nan_pt() for _ in range(n_slots)]
+        for k in range(len(trace_per_target_log), n_ids):
+            trace_per_target_log[k] = [np.nan] * max(n_slots - 1, 0)
+
+    _grow_ids(max(env.targets, default=-1) + 1, 1)
+    for k in env.targets:
+        tgt_traj[k][0] = env.targets[k].pos.copy()
 
     ev_born:    list = []
     ev_rescued: list = []
@@ -65,7 +78,6 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True,
     mean_pr_log     = []
     rmse_log        = []
     reward_log      = []
-    trace_per_target_log = {k: [] for k in range(MAX_TARGETS)}
     load_log        = {i: [] for i in range(NUM_UAVS)}
     assignment_log  = {i: [] for i in range(NUM_UAVS)}
 
@@ -73,6 +85,7 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True,
 
     for t in range(T_SLOTS):
         born = apply_births(env, schedule) if births else []
+        _grow_ids(max(born, default=-1) + 1, len(uav_traj[0]))
         if born:
             ev_born.append((t + 1, list(born)))
             for k in born:
@@ -117,15 +130,11 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True,
         pr = info["rescue_prob"]
         mean_trace_log.append(float(np.mean(list(tr.values()))) if tr else np.nan)
         mean_pr_log.append(float(np.mean(list(pr.values()))) if pr else np.nan)
-        for k in range(MAX_TARGETS):
+        for k in trace_per_target_log:
             trace_per_target_log[k].append(tr.get(k, np.nan))
         for i in range(NUM_UAVS):
             load_log[i].append(info["load"][i])
-            row = np.zeros(MAX_TARGETS, dtype=np.int8)
-            for k in info["assignments"].get(i, ()):
-                if 0 <= k < MAX_TARGETS:
-                    row[k] = 1
-            assignment_log[i].append(row)
+            assignment_log[i].append(sorted(info["assignments"].get(i, ())))
 
         ekf_means = info["ekf_means"]
         sq = [float(np.sum((ekf_means[k] - env.targets[k].pos) ** 2)) for k in ekf_means]
@@ -136,7 +145,7 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True,
 
         for i in range(NUM_UAVS):
             uav_traj[i].append(env.uavs[i].pos2d.copy())
-        for k in range(MAX_TARGETS):
+        for k in tgt_traj:
             tgt_traj[k].append(env.targets[k].pos.copy() if k in env.targets else _nan_pt())
 
         if (t + 1) % 100 == 0:
@@ -144,6 +153,14 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True,
             plot_trajectories(env, uav_traj, tgt_traj, plots_dir, t + 1)
 
     # ---- end of episode ----
+    # Assignment sets -> (T, n_ids) multi-hot per UAV, width = ids ever used.
+    n_ids = len(tgt_traj)
+    for i in range(NUM_UAVS):
+        rows = np.zeros((len(assignment_log[i]), n_ids), dtype=np.int8)
+        for t_, ks in enumerate(assignment_log[i]):
+            rows[t_, ks] = 1
+        assignment_log[i] = rows
+
     plot_eval_rescue(backlog_log, rescued_cum_log, delay_log, unassigned_log, plots_dir)
     plot_trajectories(env, uav_traj, tgt_traj, plots_dir, T_SLOTS)
     print_assignments(env)

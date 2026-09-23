@@ -6,7 +6,7 @@ class UAV:
     """Multi-rotor UAV, velocity-controlled - Eq. (1).
 
     Holds a SET of targets and senses one per slot; `sensing_target` is the one
-    measured this slot, chosen by the env. No energy state and no liveness flag:
+    measured this slot, chosen by the UAV's policy. No energy state and no liveness flag:
     the fleet is fixed and every UAV flies the whole mission.
     """
 

@@ -2,7 +2,7 @@ import numpy as np
 
 from config.params import (
     NUM_UAVS, NUM_TARGETS, MAP_SIZE, T_SLOTS, DT,
-    SNR_MIN, V_MAX_TARGET, R_MIN, MAX_TARGETS,
+    SNR_MIN, V_MAX_TARGET, R_MIN,
 )
 from components import BS, UAV, Target
 from envs.ekf import predict, update
@@ -11,6 +11,26 @@ from envs.rescue import apply_rescues, rescue_prob
 
 # Initial EKF prior for every target: position std 200 m, velocity std 5 m/s.
 SIGMA0_INIT = np.diag([200.0**2, 200.0**2, 5.0**2, 5.0**2])
+
+
+class _PerIdStreams:
+    """Independent RNG stream per target id, created on first use.
+
+    Stream k is derived from (root seed, k) alone, so a target's draws depend
+    only on its own lifetime, and there is no ceiling on the id space.
+    """
+
+    def __init__(self, seed=None, tag: int = 0):
+        self._root = np.random.SeedSequence(seed)
+        self._tag  = tag
+        self._rngs: dict = {}
+
+    def __getitem__(self, k: int):
+        rng = self._rngs.get(k)
+        if rng is None:
+            ss  = np.random.SeedSequence(self._root.entropy, spawn_key=(self._tag, int(k)))
+            rng = self._rngs[k] = np.random.default_rng(ss)
+        return rng
 
 
 class MTTEnv:
@@ -22,10 +42,11 @@ class MTTEnv:
     cost of breadth and what the allocator trades against. Targets leave only by
     being rescued; the objective is the average rescue delay, Eq. (19).
 
-    Per slot: kinematics (1) -> sensing-target pick + measurement (7)-(10) ->
+    Per slot: kinematics (1) -> measurement of the chosen member (7)-(10) ->
     EKF (14)-(18) -> rescue (6) -> target motion (2).
 
-    Actions are {uav_id: (dvx, dvy)}. The dwell split is fixed, not a control.
+    Actions are {uav_id: (dvx, dvy, k)}: a velocity increment and which member
+    of the set to sense. The dwell split is fixed, not a control.
     """
 
     def __init__(self, num_uavs=NUM_UAVS, num_targets=NUM_TARGETS,
@@ -53,13 +74,12 @@ class MTTEnv:
         # Per-id RNG streams so a target's motion and rescue draws depend only on
         # its own lifetime, not on which other ids are alive. Matters because
         # rescue removes targets at policy-dependent times.
-        self._motion_rngs = [np.random.default_rng() for _ in range(MAX_TARGETS)]
-        self._rescue_rngs = [np.random.default_rng() for _ in range(MAX_TARGETS)]
+        self._motion_rngs = _PerIdStreams(None, tag=0)
+        self._rescue_rngs = _PerIdStreams(None, tag=1)
 
     def seed_motion(self, seed) -> None:
-        seqs = np.random.SeedSequence(seed).spawn(2 * MAX_TARGETS)
-        self._motion_rngs = [np.random.default_rng(s) for s in seqs[:MAX_TARGETS]]
-        self._rescue_rngs = [np.random.default_rng(s) for s in seqs[MAX_TARGETS:]]
+        self._motion_rngs = _PerIdStreams(seed, tag=0)
+        self._rescue_rngs = _PerIdStreams(seed, tag=1)
 
     # ------------------------------------------------------------------
     def _random_target_state(self):
@@ -147,22 +167,6 @@ class MTTEnv:
         return {i: set(uav.assignment_set) for i, uav in self.uavs.items()}
 
     # ------------------------------------------------------------------
-    def _pick_sensing_target(self, uav) -> int:
-        """Which ONE member to sense this slot: highest tr(Sigma_pos).
-
-        That is the member with the lowest p_r, so refreshing it buys the most;
-        and since sensing collapses tr(Sigma), the rule self-schedules into a
-        round robin. A fixed scheduler, not a learned one - the policy's job is
-        where to fly.
-        """
-        members = [k for k in uav.assignment_set if k in self.targets]
-        if not members:
-            uav.sensing_target = None
-            return None
-        k = max(members, key=lambda k: float(np.trace(self.ekf_state[k][1][:2, :2])))
-        uav.sensing_target = k
-        return k
-
     def _compute_set_snr(self) -> dict:
         """{uav: {member: SNR it would get pointing there from here}}. Diagnostic."""
         out = {i: {k: float(radar_snr(uav, self.ekf_state[k][0][:2]))
@@ -183,10 +187,7 @@ class MTTEnv:
     def spawn_target(self, init_state=None):
         """Birth a target in a free id slot. NOT assigned to anyone - a birth is
         the event the allocator exists to respond to."""
-        free = [k for k in range(MAX_TARGETS) if k not in self.targets]
-        if not free:
-            return None
-        k = free[0]
+        k = next(k for k in range(len(self.targets) + 1) if k not in self.targets)
 
         if init_state is None:
             pos, vel = self._random_target_state()
@@ -225,13 +226,21 @@ class MTTEnv:
 
     # ------------------------------------------------------------------
     def step(self, actions: dict) -> tuple:
-        """One slot. actions: {uav_id: (dvx, dvy)}. Returns (state, info)."""
+        """One slot. Returns (state, info).
+
+        actions: {uav_id: (dvx, dvy, k)}, k the member of the UAV's set to
+        sense this slot, or None to sense nothing. Which member to sense is the
+        UAV's own decision; a k outside its set senses nothing.
+        """
         self.t += 1
         uav_ids = sorted(self.uavs)
 
         for i, uav in self.uavs.items():
-            dvx, dvy = actions.get(i, (0.0, 0.0))[:2]
-            uav.step(dvx, dvy)
+            a = actions.get(i, (0.0, 0.0, None))
+            uav.step(a[0], a[1])
+            k = a[2] if len(a) > 2 else None
+            uav.sensing_target = k if (k is not None and k in uav.assignment_set
+                                       and k in self.targets) else None
 
         # ---- sensing: one member per UAV ----
         measurements: dict = {k: [] for k in self.targets}
@@ -242,7 +251,7 @@ class MTTEnv:
 
         for i, uav in self.uavs.items():
             rate_map[i] = uplink_rate(gamma_map[i])
-            k = self._pick_sensing_target(uav)
+            k = uav.sensing_target
             if k is None:
                 continue
             z, R, snr = measure(uav, self.targets[k].pos)

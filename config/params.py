@@ -17,11 +17,6 @@ NUM_TARGETS = 8        # targets at t=0; more are born mid-mission
 # False caps every set at one target: the "w/o one-to-many" ablation.
 ONE_TO_MANY = True
 
-# Ceiling on live target ids. An implementation bound on the fixed-size logging
-# and critic arrays, not a cap on set size. Must stay above any backlog that is
-# actually reached, or it silently truncates the queue.
-MAX_TARGETS = 96
-
 # ---- UAV kinematics ----
 H     = 100.0   # m, altitude
 V_MAX = 25.0    # m/s [8]
@@ -62,15 +57,13 @@ N0     = 10 ** ((N0_DBM - 30) / 10)   # W
 SNR0 = (PTX * GT * GR * LAMBDA**2 * SIGMA0 * TAU0
         / ((4 * np.pi)**3 * R0**4 * N0))
 
-# Detection threshold. Table I gives 20 dB [9]; raised to 25 dB to shrink the
-# footprint, which at 20 dB reached 723 m - three UAVs would have covered more
-# than the whole map at once. Range goes as SNR_min^(-1/4), so 25 dB gives a
-# 489 m ground radius, 19% of the map per UAV.
-SNR_MIN_DB = 25.0
+# Detection threshold, Table I [9]. Gives a 659 m ground radius of the
+# detection footprint (range goes as SNR_min^(-1/4)).
+SNR_MIN_DB = 20.0
 SNR_MIN    = 10 ** (SNR_MIN_DB / 10)
 
 # Sensing/communication split of each slot. A fixed system parameter, not a
-# control: the action space of P2 is (dv_x, dv_y) only.
+# control: the action space of P2 is (dv_x, dv_y, which member to sense).
 TAU       = 0.5   # [9]
 TAU_SENSE = TAU * DT
 TAU_COMM  = (1.0 - TAU) * DT
@@ -86,24 +79,29 @@ B     = 1e6   # Hz
 R_MIN = 1e6   # bps
 
 # ---- Target birth - Eq. (5) ----
-# Uniform over the area; targets leave only by being rescued. The load knee is
-# sharp: 0.07 holds |K|/|U| near 0.8 with 98% rescued, 0.10 jumps to 4.2 with
-# 63% rescued as the queue tips into saturation.
-P_BIRTH = 0.08
+# Uniform over the area; targets leave only by being rescued. No cap.
+# Starting point for tuning the load. With a stand-in policy (fly to the
+# nearest member, sense the member with the largest expected p_r gain) fleet
+# throughput is ~0.40 / 0.59 / 0.76 rescues per slot at 6 / 12 / 24 live
+# targets and falls past ~24, so p_b near 0.5 puts |K|/|U| around 3 with wide
+# swings. A better policy or allocator clears faster and lowers the ratio.
+P_BIRTH = 0.45
 
 # ---- Rescue - Eq. (6) ----
 # p_r = LAMBDA_RESCUE / (LAMBDA_RESCUE + tr(Sigma_pos)).
-# Set for a median p_r near 0.15 at first detection, where the measured median
-# tr is 0.040 m^2. The spread is wide and inherent: SNR goes as r^-4, so tr
-# after a measurement varies ~100x across the footprint.
-LAMBDA_RESCUE = 0.007   # m^2
+# Set for a median p_r near 0.2 on the slot a target is sensed. With the 659 m
+# footprint targets are often sensed from far away, and SNR goes as r^-4, so tr
+# after a measurement varies ~100x across the footprint; a policy that flies
+# closer raises the median.
+LAMBDA_RESCUE = 0.025   # m^2
 
 # ---- Observation ----
 # Per-target uncertainty scalar of Eq. (24). "p_r" is lambda/(lambda+tr Sigma);
 # "log" is log10(tr Sigma) rescaled to [0,1]. p_r saturates - tr spans ~10
 # orders of magnitude and p_r compresses nearly all of it to 0, using a few
-# percent of its own range.
-SIGMA_FEATURE = os.environ.get("SIGMA_FEATURE", "p_r")
+# percent of its own range, so the actor cannot tell a member one slot stale
+# from one never sensed.
+SIGMA_FEATURE = os.environ.get("SIGMA_FEATURE", "log")
 
 # ---- Agentic AI (detector -> judge -> planner) ----
 JUDGE_MODEL   = "gemini-3.1-flash-lite"
