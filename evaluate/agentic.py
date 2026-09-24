@@ -104,6 +104,7 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True,
             env.apply_assignments(new_asgn)
             state = env._system_state()
 
+        if new_asgn is not None and agentic.last_step_replanned:
             entry = agentic.log[-1]
             brief = entry["brief"]
             print(f"\n[Slot {t+1}] RE-PARTITION  (|K|={entry['backlog']})")
@@ -218,6 +219,7 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True,
     print(f"  Planner calls (heavy LLM) : {len(pa_lat)}" +
           (f" | mean {np.mean(pa_lat):.2f}s | total {np.sum(pa_lat):.1f}s" if pa_lat else ""))
     print(f"  Re-partitions installed   : {len(agentic.log)}")
+    print(f"  Newborns placed interim   : {agentic.n_interim}")
     if agentic.judge_log:
         from collections import Counter
         print(f"  Judge verdicts : {dict(Counter(v['decision'] for v in agentic.judge_log))}")

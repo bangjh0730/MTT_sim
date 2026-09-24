@@ -64,6 +64,11 @@ class AgenticAI:
         self._last_replan_slot = -10**9
         self._hold_until_slot  = 0    # set when the judge answers "defer"
 
+        # True when this slot's step() installed an LLM plan, False when it only
+        # placed newborn targets (or returned nothing).
+        self.last_step_replanned = False
+        self.n_interim = 0            # newborn targets placed on the nearest UAV
+
     # ── latency accessors ─────────────────────────────────────────────────────
     @property
     def ja_latencies(self) -> list:
@@ -124,18 +129,34 @@ class AgenticAI:
 
     def _graph_worker(self, snapshot: dict):
         """Runs in a daemon thread; stores the result in self._pending when done."""
+        seen = set(snapshot["system_state"].get("targets", {}))
         try:
             result = self._graph.invoke(snapshot)
             with self._lock:
                 if result.get("brief") is not None and result.get("assignments") is not None:
                     self._pending = (result["assignments"], result["brief"],
-                                     result.get("reasoning", ""))
+                                     result.get("reasoning", ""), seen)
                 else:
                     self._pending = _NO_REPLAN
         except Exception as e:
             print(f"[AAI] Worker failed: {e}")
             with self._lock:
                 self._pending = _NO_REPLAN
+
+    # ── interim placement ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _nearest_uav(system_state: dict, k: int) -> int:
+        p = system_state["targets"][k][0][:2]
+        return min(system_state["uavs"],
+                   key=lambda i: float((system_state["uavs"][i][0] - p[0]) ** 2
+                                       + (system_state["uavs"][i][1] - p[1]) ** 2))
+
+    def _place(self, table: dict, system_state: dict, targets) -> None:
+        """Put each target on the UAV nearest its estimate, in place."""
+        for k in targets:
+            table.setdefault(self._nearest_uav(system_state, k), set()).add(k)
+            self.n_interim += 1
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -153,10 +174,18 @@ class AgenticAI:
         Returns
         -------
         {uav_id: set(target ids)} to install, or None to carry the current
-        partition forward.
+        partition forward. `last_step_replanned` says whether it is an LLM plan
+        or only the interim placement of newborn targets.
+
+        A newborn target is placed on the UAV nearest its estimate in the slot it
+        appears, so no target waits unassigned while the LLMs think; the next
+        plan decides where it really goes.
         """
         self._slot += 1
         result = None
+        self.last_step_replanned = False
+        live   = set(system_state.get("targets", {}))
+        current = {i: set(ks) for i, ks in system_state.get("assignments", {}).items()}
 
         # ── 1. pick up a finished round trip ──────────────────────────────────
         with self._lock:
@@ -165,14 +194,23 @@ class AgenticAI:
                 self._pending = None
 
         if pending is not None and pending is not _NO_REPLAN:
-            new_asgn, brief, reasoning = pending
+            new_asgn, brief, reasoning, seen = pending
             # A plan computed in the background can be stale: targets may have been
             # rescued, or new ones born, while the LLMs were thinking. Drop the ids
             # that no longer exist rather than discarding the whole plan — under
             # this load one rescue during a round trip is routine, and throwing the
             # plan away for it would mean almost never landing one.
-            live  = set(system_state.get("targets", {}))
             clean = {i: {k for k in ks if k in live} for i, ks in new_asgn.items()}
+            # Targets born after the plan's snapshot are not in it; they keep
+            # their interim holder rather than being dropped. Targets the planner
+            # saw and left out stay unassigned: that was its decision.
+            planned = set().union(*clean.values()) if clean else set()
+            for k in sorted(live - seen - planned):
+                holder = next((i for i, ks in current.items() if k in ks), None)
+                if holder is not None:
+                    clean.setdefault(holder, set()).add(k)
+                else:
+                    self._place(clean, system_state, [k])
             self._last_replan_slot = self._slot
             self._detector.note_replan(self._slot)
             self.log.append({
@@ -183,6 +221,16 @@ class AgenticAI:
                 "backlog":     info.get("backlog", 0) if info else 0,
             })
             result = clean
+            self.last_step_replanned = True
+
+        # ── 1b. interim placement of this slot's births ─────────────────────────
+        base   = result if result is not None else current
+        placed = set().union(*base.values()) if base else set()
+        newborn = [k for k in (born or []) if k in live and k not in placed]
+        if newborn:
+            if result is None:
+                result = {i: set(ks) for i, ks in current.items()}
+            self._place(result, system_state, newborn)
 
         # ── 2. detector: record this slot's events, decide whether to alarm ───
         alarm = self._detector.observe(self._slot, born or [], info or {})

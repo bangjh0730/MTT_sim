@@ -402,9 +402,8 @@ def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./res
         for t in range(env.T):
             born     = apply_births(env, schedule)
             rescued  = info["rescued"] if info is not None else []
-            # Birth / rescue / hold-timer triggers. Between them the partition is
-            # held while targets and UAVs drift, and serving that staleness is
-            # most of what the actor is learning.
+            # Every birth or rescue re-partitions all live targets; between
+            # events the partition is held while targets and UAVs drift.
             if part.update(env, born=born, rescued=rescued):
                 state = env._system_state()
 

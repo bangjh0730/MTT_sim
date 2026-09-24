@@ -36,8 +36,6 @@ def _travel(uav, p) -> float:
     little or no flight."""
     return max(0.0, float(np.linalg.norm(uav.pos2d - p)) - _R_DETECT)
 
-_HOLD_SLOTS = (8, 120)      # partition lifetime between timer-driven re-solves
-
 # What keeping an already-held target is worth, in metres of extra travel, when
 # matching clusters to UAVs. Stops a re-solve from shuffling sets wholesale.
 _STICKINESS_M = 350.0
@@ -70,9 +68,7 @@ class TrainingPartitioner:
 
     def __init__(self, rng=None):
         self.rng = rng if rng is not None else np.random.default_rng()
-        self._next_resolve = 0
         self.n_resolves = 0
-        self.n_event_updates = 0
 
     def reset(self, env) -> None:
         """Draw this episode's difficulty, then partition once."""
@@ -82,37 +78,45 @@ class TrainingPartitioner:
         self.skew = r.choice(["natural", "balanced", "concentrated"],
                              p=[0.40, 0.40, 0.20])
         self.noise_frac = float(r.uniform(0.10, 0.40)) if r.random() < 0.35 else 0.0
-        self._next_resolve = int(r.integers(*_HOLD_SLOTS))
+        uav_ids = sorted(env.uavs)
+        self.heavy = uav_ids[int(r.integers(0, len(uav_ids)))]
+        self._draws: dict = {}
         self.resolve(env)
+
+    def _u(self, env, k: int, j: int) -> float:
+        """The j-th random draw of target k, fixed for the target's lifetime.
+
+        The randomised modifiers (noise, concentration) read these instead of
+        fresh draws: the partition is re-solved at every birth and rescue, and
+        fresh draws each time would bounce targets between UAVs at random. Keyed
+        by (id, birth slot) because ids are reused after a rescue.
+        """
+        key = (k, env.targets[k].birth_slot)
+        d = self._draws.get(key)
+        if d is None:
+            d = self._draws[key] = self.rng.random(3)
+        return float(d[j])
 
     def update(self, env, born=None, rescued=None) -> bool:
         """Advance one slot; True if the partition changed.
 
-        Triggers are birth, rescue and the hold timer. Between them the
-        partition is held while everything drifts, and serving that staleness is
-        most of what the actor learns.
+        Every birth and every rescue re-partitions ALL live targets: a new
+        target needs a holder, and a rescue changes every holder's load, so the
+        best sets can change everywhere, not just where the event happened.
+        Between events the partition is held while targets and UAVs drift.
         """
-        if env.t >= self._next_resolve:
+        if born or rescued:
             self.resolve(env)
-            self._next_resolve = env.t + int(self.rng.integers(*_HOLD_SLOTS))
             return True
-
-        changed = False
-        if born:
-            self._absorb_births(env, born)
-            changed = True
-        if rescued:
-            self._rebalance_after_rescue(env)
-            changed = True
-        if changed:
-            self.n_event_updates += 1
-        return changed
+        return False
 
     # ------------------------------------------------------------------
     def resolve(self, env) -> None:
         live = sorted(env.targets)
         if not live:
             return
+        alive = {(k, env.targets[k].birth_slot) for k in live}
+        self._draws = {key: d for key, d in self._draws.items() if key in alive}
         uav_ids = sorted(env.uavs)
         pos = {k: env.ekf_state[k][0][:2] for k in live}
 
@@ -262,71 +266,30 @@ class TrainingPartitioner:
                     np.linalg.norm(env.uavs[i].pos2d - pos[k])))
                 sets[src].discard(k); sets[dst].add(k)
         else:
-            heavy = uav_ids[int(self.rng.integers(0, len(uav_ids)))]
+            heavy = self.heavy
             for i in uav_ids:
                 if i == heavy:
                     continue
-                for k in list(sets[i]):
+                for k in sorted(sets[i]):
                     if len(sets[i]) <= 1:
                         break
-                    if reachable(heavy, k) and self.rng.random() < 0.6:
+                    if reachable(heavy, k) and self._u(env, k, 0) < 0.6:
                         sets[i].discard(k); sets[heavy].add(k)
 
     def _inject_noise(self, sets, pos, env, uav_ids) -> None:
         """Rehome a fraction of targets at random, within the reach cap."""
         if self.noise_frac <= 0.0:
             return
-        allk = [k for s in sets.values() for k in s]
-        n = int(round(self.noise_frac * len(allk)))
-        if n <= 0:
-            return
-        for k in self.rng.permutation(allk)[:n]:
-            k = int(k)
+        # Each target is noisy or not for its whole lifetime (draw 1), and a
+        # noisy one prefers the same slot among its candidates (draw 2).
+        for k in sorted(k for s in sets.values() for k in s):
+            if self._u(env, k, 1) >= self.noise_frac:
+                continue
             cand = [i for i in uav_ids
                     if _travel(env.uavs[i], pos[k]) <= self._affordable_radius(len(sets[i]) + 1)]
             if not cand:
                 continue
-            dst = int(cand[self.rng.integers(0, len(cand))])
+            dst = int(cand[int(self._u(env, k, 2) * len(cand))])
             for s in sets.values():
                 s.discard(k)
             sets[dst].add(k)
-
-    # ------------------------------------------------------------------
-    def _absorb_births(self, env, born) -> None:
-        table = env.assignment_table()
-        for k in born:
-            if k not in env.targets:
-                continue
-            p = env.ekf_state[k][0][:2]
-            cand = [i for i in table
-                    if _travel(env.uavs[i], p) <= self._affordable_radius(len(table[i]) + 1)]
-            pool = cand or list(table)
-            i = min(pool, key=lambda i: (float(np.linalg.norm(env.uavs[i].pos2d - p)),
-                                         len(table[i])))
-            table[i].add(k)
-        env.apply_assignments(table)
-
-    def _rebalance_after_rescue(self, env) -> None:
-        """A rescue frees capacity, so the freed UAV absorbs load. Its lower
-        load widens its affordable radius, so targets nobody could reach at the
-        last re-solve may be reachable now."""
-        table = env.assignment_table()
-        if len(table) < 2:
-            return
-        for _ in range(3):
-            light = min(table, key=lambda i: (len(table[i]), i))
-            heavy = max(table, key=lambda i: (len(table[i]), i))
-            if light == heavy or len(table[heavy]) - len(table[light]) < 2:
-                break
-            budget = self._affordable_radius(len(table[light]) + 1)
-            cand = [k for k in table[heavy] if k in env.targets and
-                    _travel(env.uavs[light], env.ekf_state[k][0][:2]) <= budget]
-            if not cand:
-                break
-            k = min(cand, key=lambda k: float(
-                np.linalg.norm(env.uavs[light].pos2d - env.ekf_state[k][0][:2])))
-            table[heavy].discard(k); table[light].add(k)
-
-        pos = {k: env.ekf_state[k][0][:2] for k in env.targets}
-        self._fill_idle(env, table, pos, sorted(env.uavs))
-        env.apply_assignments(table)
