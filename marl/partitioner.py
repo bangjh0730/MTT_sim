@@ -28,13 +28,6 @@ _FLIGHT_BUDGET_SLOTS = (20, 96)
 _R_DETECT = float(np.sqrt(R_DETECT_2))
 
 
-def _travel(uav, p) -> float:
-    """Flight needed to bring p into the detection footprint: the distance
-    beyond the footprint radius, not the distance to p itself. With a ~660 m
-    footprint most of the map is sensable from a central position, so charging
-    the full distance would make the reach budget refuse targets that need
-    little or no flight."""
-    return max(0.0, float(np.linalg.norm(uav.pos2d - p)) - _R_DETECT)
 
 # What keeping an already-held target is worth, in metres of extra travel, when
 # matching clusters to UAVs. Stops a re-solve from shuffling sets wholesale.
@@ -120,6 +113,13 @@ class TrainingPartitioner:
         uav_ids = sorted(env.uavs)
         pos = {k: env.ekf_state[k][0][:2] for k in live}
 
+        # UAV-to-target distances for this re-solve, computed once: the helpers
+        # below query them per (UAV, target) pair many thousands of times.
+        U = np.array([env.uavs[i].pos2d for i in uav_ids])
+        P = np.array([pos[k] for k in live])
+        D = np.sqrt(((U[:, None, :] - P[None, :, :]) ** 2).sum(-1))
+        self._dist = {i: dict(zip(live, row)) for i, row in zip(uav_ids, D.tolist())}
+
         sets = (self._voronoi(env, live, pos, uav_ids) if self.mode == "voronoi"
                 else self._kmeans(env, live, pos, uav_ids))
 
@@ -137,7 +137,7 @@ class TrainingPartitioner:
     def _voronoi(self, env, live, pos, uav_ids) -> dict:
         sets = {i: set() for i in uav_ids}
         for k in live:
-            i = min(uav_ids, key=lambda i: float(np.linalg.norm(env.uavs[i].pos2d - pos[k])))
+            i = min(uav_ids, key=lambda i: self._dist[i][k])
             sets[i].add(k)
         return sets
 
@@ -174,6 +174,14 @@ class TrainingPartitioner:
                 for a, i in enumerate(uav_ids)}
 
     # ------------------------------------------------------------------
+    def _travel(self, i: int, k: int) -> float:
+        """Flight UAV i needs to bring target k into its detection footprint:
+        the distance beyond the footprint radius, not the distance to k itself.
+        With a ~660 m footprint most of the map is sensable from a central
+        position, so charging the full distance would make the reach budget
+        refuse targets that need little or no flight."""
+        return max(0.0, self._dist[i][k] - _R_DETECT)
+
     def _affordable_radius(self, load: int) -> float:
         """How far this UAV can afford to fly (beyond its footprint) given
         what it already holds.
@@ -199,18 +207,17 @@ class TrainingPartitioner:
             moved = False
             for i in uav_ids:
                 for k in list(sets[i]):
-                    if _travel(env.uavs[i], pos[k]) <= self._affordable_radius(len(sets[i])):
+                    if self._travel(i, k) <= self._affordable_radius(len(sets[i])):
                         continue
                     cand = [j for j in uav_ids if j != i
-                            and _travel(env.uavs[j], pos[k])
+                            and self._travel(j, k)
                             <= self._affordable_radius(len(sets[j]) + 1)]
                     if cand:
                         j = min(cand, key=lambda j: (
-                            float(np.linalg.norm(env.uavs[j].pos2d - pos[k])),
+                            self._dist[j][k],
                             len(sets[j])))
                     else:
-                        j = min(uav_ids, key=lambda j: float(
-                            np.linalg.norm(env.uavs[j].pos2d - pos[k])))
+                        j = min(uav_ids, key=lambda j: self._dist[j][k])
                         if j == i:
                             continue
                     if j != i:
@@ -236,7 +243,7 @@ class TrainingPartitioner:
                 return
             cand = [(j, k) for j in donors for k in sets[j]]
             j, k = min(cand, key=lambda jk: (
-                float(np.linalg.norm(env.uavs[i].pos2d - pos[jk[1]]))
+                self._dist[i][jk[1]]
                 - _STICKINESS_M * (len(sets[jk[0]]) - 1)))
             sets[j].discard(k); sets[i].add(k)
 
@@ -246,7 +253,7 @@ class TrainingPartitioner:
             return
 
         def reachable(i, k):
-            return _travel(env.uavs[i], pos[k]) <= self._affordable_radius(len(sets[i]) + 1)
+            return self._travel(i, k) <= self._affordable_radius(len(sets[i]) + 1)
 
         n_live = sum(len(s) for s in sets.values())
         if self.skew == "balanced":
@@ -257,13 +264,11 @@ class TrainingPartitioner:
                 if not over or not under:
                     break
                 src = max(over, key=lambda i: len(sets[i]))
-                k = max(sets[src], key=lambda k: float(
-                    np.linalg.norm(env.uavs[src].pos2d - pos[k])))
+                k = max(sets[src], key=lambda k: self._dist[src][k])
                 cand = [i for i in under if reachable(i, k)]
                 if not cand:
                     break
-                dst = min(cand, key=lambda i: float(
-                    np.linalg.norm(env.uavs[i].pos2d - pos[k])))
+                dst = min(cand, key=lambda i: self._dist[i][k])
                 sets[src].discard(k); sets[dst].add(k)
         else:
             heavy = self.heavy
@@ -286,7 +291,7 @@ class TrainingPartitioner:
             if self._u(env, k, 1) >= self.noise_frac:
                 continue
             cand = [i for i in uav_ids
-                    if _travel(env.uavs[i], pos[k]) <= self._affordable_radius(len(sets[i]) + 1)]
+                    if self._travel(i, k) <= self._affordable_radius(len(sets[i]) + 1)]
             if not cand:
                 continue
             dst = int(cand[int(self._u(env, k, 2) * len(cand))])
