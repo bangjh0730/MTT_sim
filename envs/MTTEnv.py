@@ -163,6 +163,13 @@ class MTTEnv:
             clean[i] = set(self.uavs[i].assignment_set)
         self.bs.set_assignments(clean)
 
+        # First assignment of each target, for the reward's delay term: the
+        # reward charges waiting from assignment, the metric D from birth.
+        for ks in clean.values():
+            for k in ks:
+                if self.targets[k].assigned_slot is None:
+                    self.targets[k].assigned_slot = self.t
+
     def assignment_table(self) -> dict:
         return {i: set(uav.assignment_set) for i, uav in self.uavs.items()}
 
@@ -284,6 +291,7 @@ class MTTEnv:
         # Backlog counted before removals: a target rescued at t did wait slot t.
         backlog_before = len(self.targets)
         self.backlog_sum += backlog_before
+        n_waiting = sum(1 for tgt in self.targets.values() if tgt.assigned_slot is not None)
 
         trace_pos = {k: float((self.ekf_state[k][1][0, 0] + self.ekf_state[k][1][1, 1])) for k in self.targets}
         pr_now    = {k: rescue_prob(v) for k, v in trace_pos.items()}
@@ -302,6 +310,7 @@ class MTTEnv:
         info = {
             "t": self.t,
             "backlog":            backlog_before,
+            "n_waiting":          n_waiting,   # live targets assigned at least once (reward)
             "rescued":            [k for k, _ in rescued],
             "rescue_delays":      [d for _, d in rescued],
             "n_rescued_total":    len(self.rescue_delays),

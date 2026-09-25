@@ -2,32 +2,45 @@ import numpy as np
 
 
 def per_agent_rewards(info: dict, uavs: dict) -> np.ndarray:
-    """r_i = -sum_{k in A_i} (1 - p_r,k(t)): minus the expected number of UAV
-    i's targets still waiting after this slot.
+    """r_i = sum_{k in A_i} p_r,k(t) - |K_a^t| / |U|.
 
-    Each member that waits costs 1 - that is the delay: summed over time the
-    reward is -sum_t |A_i^t| in expectation, UAV i's share of the target-slots
-    counted by Eq. (19). Each member's cost is cut by its rescue probability,
-    so raising p_r is rewarded in the same slot.
+    Two parts:
+      - own expected rescues, sum of p_r over UAV i's set: credit for how well
+        UAV i positions and senses (maximise rescue probability);
+      - an equal share of the fleet backlog, |K_a^t| / |U|, where K_a^t is the
+        live targets that have been assigned at least once: a target's waiting
+        is charged from its first assignment until its rescue (minimise rescue
+        delay). The metric D of Eq. (19) still counts from birth; the two agree
+        whenever targets are assigned the slot they appear.
+    Summed over UAVs the reward is -sum_{k in K} (1 - p_r,k) when every target
+    is assigned: minus the expected number of targets still waiting after the
+    slot.
 
-    Replaces two earlier forms:
-      - sum_k (p_r,k(t) - p_r,k(t-1)), Eq. (25): telescopes, so over an
-        episode it collapses to p_r at the end minus p_r at the start.
-      - sum_k p_r,k(t), expected rescues: with a birth process every target is
-        eventually rescued, so rescues per slot average the birth rate whatever
-        the policy does (measured 0.151 = P_BIRTH / |U| throughout training).
-        It does not see how LONG targets wait, and a rescued target stops
-        paying, so clearing a set earned nothing.
+    The delay is charged to the FLEET, not to each UAV's own set. Charging
+    -sum_{k in A_i} (1 - p_r,k) per UAV collapsed training (backlog ~100,
+    ~17 rescues per episode): the allocator re-partitions on every birth and
+    rescue by where the UAVs are, reassigning about as many targets per slot as
+    are rescued, so a UAV was charged at once for flying toward targets it
+    would be handed, and paid off only later when it rescued them. A shared
+    backlog cannot be moved between UAVs, and holding a target only adds to
+    the own-rescue term.
 
-    Sets are taken BEFORE this slot's rescue removals, so a target rescued this
-    slot is charged 1 - p_r for the slot it did wait.
+    Earlier forms, for the record:
+      - sum_k (p_r,k(t) - p_r,k(t-1)), Eq. (25): telescopes to p_r at the end
+        minus p_r at the start.
+      - sum_k p_r,k(t) alone: with a birth process every target is eventually
+        rescued, so it averages P_BIRTH / |U| whatever the policy does and does
+        not see how LONG targets wait.
+
+    Sets and p_r are taken BEFORE this slot's rescue removals, so a target
+    rescued this slot is counted for the slot it did wait.
     """
     N = len(uavs)
-    rewards = np.zeros(N, dtype=np.float32)
+    pr_now  = info.get("rescue_prob", {})
+    sets    = info.get("assignments_pre", info.get("assignments", {}))
+    backlog = float(info.get("n_waiting", info.get("backlog", len(pr_now))))
 
-    pr_now = info.get("rescue_prob", {})
-    sets   = info.get("assignments_pre", info.get("assignments", {}))
-
+    rewards = np.full(N, -backlog / N, dtype=np.float32)
     for i in range(N):
-        rewards[i] = -float(sum(1.0 - pr_now.get(k, 0.0) for k in sets.get(i, ())))
+        rewards[i] += float(sum(pr_now.get(k, 0.0) for k in sets.get(i, ())))
     return rewards

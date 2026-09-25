@@ -18,6 +18,7 @@ class Target:
                                init_vel[0], init_vel[1]], dtype=float)
 
         self.birth_slot       = int(birth_slot)
+        self.assigned_slot    = None   # first slot it was in a UAV's set (reward only)
         self.rescue_slot      = None
         self.rescued          = False
         self.last_sensed_slot = int(birth_slot)
