@@ -85,7 +85,7 @@ R_MIN = 1e6   # bps
 # throughput is ~0.40 / 0.59 / 0.76 rescues per slot at 6 / 12 / 24 live
 # targets and falls past ~24, so p_b near 0.5 puts |K|/|U| around 3 with wide
 # swings. A better policy or allocator clears faster and lowers the ratio.
-P_BIRTH = 0.45
+P_BIRTH = 0.65
 
 # ---- Rescue - Eq. (6) ----
 # p_r = LAMBDA_RESCUE / (LAMBDA_RESCUE + tr(Sigma_pos)).
