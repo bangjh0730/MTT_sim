@@ -25,7 +25,6 @@ class RolloutBuffer:
         self.ego      = []   # [T*N] of np [EGO_DIM]
         self.mem      = []   # [T*N] of np [|A_i|, MEM_DIM]
         self.raw      = []   # [T*N] of np [2]      pre-tanh velocity
-        self.idx      = []   # [T*N] ints            sensing index, -1 if none
         self.logprobs = []   # [T*N] floats
         self.c_ego    = []   # [T*N] of np [EGO_DIM]
         self.c_uav    = []   # [T*N] of np [|U|, U_DIM]
@@ -44,8 +43,7 @@ class MAPPO:
     Multi-Agent PPO with Centralized Training Decentralized Execution (CTDE).
 
     Implements the Dec-POMDP:
-      - Shared actor  πθ  acts on local obs  o^t_i and outputs
-        (dvx, dvy, which member of A_i to sense)
+      - Shared actor  πθ  acts on local obs  o^t_i and outputs (dvx, dvy)
       - Centralized critic  V_i(S^t)  per agent, over the full state
       - Per-agent reward  r^t_i
       - Per-agent GAE against the per-agent value
@@ -150,25 +148,24 @@ class MAPPO:
         Produce one action per UAV.
         `info` is the dict from the previous env.step().
         Pass info=None for the very first slot (after reset).
-        Pass deterministic=True during eval (mean velocity, most likely member).
+        Pass deterministic=True during eval (mean velocity).
 
-        Returns env-compatible actions: {uav_id: (dvx, dvy, target id or None)}.
+        Returns env-compatible actions: {uav_id: (dvx, dvy)}.
         Stores (obs, action, logprob, value) in the buffer.
         """
         egos, mems, ids = zip(*[local_obs(state, i, info) for i in range(self.num_uavs)])
 
         with torch.no_grad():
-            act_t, raw_t, idx_t, lp_t = self._actor_cpu.get_action(
+            act_t, raw_t, lp_t = self._actor_cpu.get_action(
                 *self._actor_batch(egos, mems, self.cpu), deterministic=deterministic)
         act = act_t.cpu().numpy()
-        idx = idx_t.cpu().numpy()
 
         if not deterministic:
             # Critic and rollout buffer are only needed during training.
             c_ego, c_uav, c_tgt = self._critic_obs_all(state)
             b = self.buffer
             b.ego.extend(egos);   b.mem.extend(mems)
-            b.raw.extend(raw_t.cpu().numpy()); b.idx.extend(idx.tolist())
+            b.raw.extend(raw_t.cpu().numpy())
             b.logprobs.extend(lp_t.cpu().numpy().tolist())
             b.c_ego.extend(c_ego); b.c_uav.extend(c_uav); b.c_tgt.extend(c_tgt)
             b.values.append(self._values(c_ego, c_uav, c_tgt))
@@ -177,10 +174,8 @@ class MAPPO:
         # to V_MAX inside UAV.step, so constraint (20a) always holds.
         env_actions = {}
         for i in range(self.num_uavs):
-            k = ids[i][idx[i]] if idx[i] >= 0 else None
             env_actions[i] = (float(act[i, 0]) * V_MAX,    # dvx in [-V_MAX, V_MAX]
-                              float(act[i, 1]) * V_MAX,    # dvy in [-V_MAX, V_MAX]
-                              k)
+                              float(act[i, 1]) * V_MAX)    # dvy in [-V_MAX, V_MAX]
         return env_actions
 
     def store_outcome(self, rewards: np.ndarray, done: bool):
@@ -227,7 +222,7 @@ class MAPPO:
 
         # Row order (slot, agent) matches the buffer's flattened samples.
         self._accum.append(dict(
-            ego=b.ego, mem=b.mem, raw=b.raw, idx=b.idx, logprobs=b.logprobs,
+            ego=b.ego, mem=b.mem, raw=b.raw, logprobs=b.logprobs,
             c_ego=b.c_ego, c_uav=b.c_uav, c_tgt=b.c_tgt,
             adv=advantages.reshape(-1), ret=returns.reshape(-1)))
 
@@ -243,7 +238,6 @@ class MAPPO:
         ego, mem = cat("ego"), cat("mem")
         c_ego, c_uav, c_tgt = cat("c_ego"), cat("c_uav"), cat("c_tgt")
         raw    = np.stack(cat("raw"))
-        idx    = np.array(cat("idx"))
         old_lp = np.array(cat("logprobs"), dtype=np.float32)
         flat_adv     = np.concatenate([ep["adv"] for ep in self._accum])
         flat_returns = np.concatenate([ep["ret"] for ep in self._accum])
@@ -294,7 +288,7 @@ class MAPPO:
                 self._actor_batch([ego[j] for j in ch], [mem[j] for j in ch]),
                 self._critic_batch([c_ego[j] for j in ch], [c_uav[j] for j in ch],
                                    [c_tgt[j] for j in ch]),
-                self._t(raw[ch]), self._t(idx[ch], torch.long), self._t(old_lp[ch]),
+                self._t(raw[ch]), self._t(old_lp[ch]),
                 self._t(norm_adv[ch]), self._t(norm_ret[ch]),
             ))
 
@@ -307,8 +301,8 @@ class MAPPO:
             self.critic_optim.zero_grad()
             actor_loss = critic_loss = 0.0
 
-            for actor_in, critic_in, raw_t, idx_t, old_lp_t, adv_t, ret_t in batches:
-                logprobs, entropy = self.actor.evaluate(*actor_in, raw_t, idx_t)
+            for actor_in, critic_in, raw_t, old_lp_t, adv_t, ret_t in batches:
+                logprobs, entropy = self.actor.evaluate(*actor_in, raw_t)
 
                 ratios = torch.exp((logprobs - old_lp_t).clamp(-10.0, 10.0))
 

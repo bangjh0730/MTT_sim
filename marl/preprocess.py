@@ -66,8 +66,10 @@ def _ego(state: dict, uav_id: int) -> np.ndarray:
 def local_obs(state: dict, uav_id: int, info: dict = None):
     """Returns (ego [EGO_DIM], members [|A_i|, MEM_DIM], member ids [|A_i|]).
 
-    Row j of `members` is target member_ids[j]; the actor's sensing choice is
-    an index into these rows.
+    Row j of `members` is target member_ids[j]. Every member of the assignment
+    set is included whatever its range, with an in-range flag as the last
+    column, so a target the radar currently cannot reach is still visible to the
+    policy - which is what lets it decide to go and fetch it.
     """
     x, y = state["uavs"][uav_id][:2]
     ids  = _members_by_distance(state, uav_id, x, y)

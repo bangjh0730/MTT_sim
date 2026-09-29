@@ -36,11 +36,10 @@ class MAPPOActor(nn.Module):
     """
     Decentralized actor for one UAV, shared by all (parameter sharing).
 
-    Its action is (dvx, dvy, c): a velocity increment and which member of its
-    assignment set to sense this slot. The set is read as a set - a shared
-    per-member encoder, pooled - so any |A_i| is accepted and the sensing head
-    scores each member in the context of the whole set. Nothing about which
-    member to sense is hard-coded: it is learned from the reward.
+    Its action is (dvx, dvy), a velocity increment. Which member to sense is
+    NOT a control - the env cycles the assigned set by need among those in
+    range - so flying is the whole of the policy's job. The set is still read as
+    a set, a shared per-member encoder then pooled, so any |A_i| is accepted.
     """
     def __init__(self, ego_dim: int, mem_dim: int, hidden: int = 128):
         super().__init__()
@@ -49,54 +48,37 @@ class MAPPOActor(nn.Module):
             nn.Linear(ego_dim + 2 * hidden, 256), nn.ReLU(),
             nn.Linear(256, hidden), nn.ReLU(),
         )
-        self.vel_head   = nn.Linear(hidden, ACT_DIM)
-        self.sense_head = nn.Sequential(nn.Linear(2 * hidden, hidden), nn.ReLU(),
-                                        nn.Linear(hidden, 1))
-        self.log_std = nn.Parameter(torch.full((ACT_DIM,), LOG_STD_INIT))
+        self.vel_head = nn.Linear(hidden, ACT_DIM)
+        self.log_std  = nn.Parameter(torch.full((ACT_DIM,), LOG_STD_INIT))
 
     def forward(self, ego, mem, mask):
         """ego [B, E], mem [B, n, M], mask [B, n] ->
-        (velocity mean [B, 2], log_std [2], sensing logits [B, n])."""
-        n     = mem.shape[1]
-        h     = self.mem_enc(torch.cat([mem, ego.unsqueeze(1).expand(-1, n, -1)], -1))
-        c     = self.ctx(torch.cat([ego, _pool(h, mask)], -1))
-        mean  = self.vel_head(c)
-        logit = self.sense_head(torch.cat([h, c.unsqueeze(1).expand(-1, n, -1)], -1)).squeeze(-1)
-        logit = logit.masked_fill(~mask, _NEG_INF)
-        return mean, self.log_std.clamp(LOG_STD_MIN, LOG_STD_MAX), logit
+        (velocity mean [B, 2], log_std [2])."""
+        n    = mem.shape[1]
+        h    = self.mem_enc(torch.cat([mem, ego.unsqueeze(1).expand(-1, n, -1)], -1))
+        c    = self.ctx(torch.cat([ego, _pool(h, mask)], -1))
+        return self.vel_head(c), self.log_std.clamp(LOG_STD_MIN, LOG_STD_MAX)
 
     def get_action(self, ego, mem, mask, deterministic: bool = False):
-        """Returns (tanh velocity [B, 2], pre-tanh velocity [B, 2],
-        sensing index [B] (-1 for an empty set), log-prob [B]).
+        """Returns (tanh velocity [B, 2], pre-tanh velocity [B, 2], log-prob [B]).
 
         The pre-tanh sample is what gets stored and re-evaluated: recovering it
         with atanh from a float32 tanh output is lossy once |raw| > ~5.
         """
-        mean, log_std, logit = self.forward(ego, mem, mask)
-        has = mask.any(1)
+        mean, log_std = self.forward(ego, mem, mask)
         if deterministic:
-            idx = torch.where(has, logit.argmax(1), torch.full_like(has, -1, dtype=torch.long))
-            return mean.tanh(), mean, idx, torch.zeros(ego.shape[0], device=ego.device)
+            return mean.tanh(), mean, torch.zeros(ego.shape[0], device=ego.device)
         noise = torch.randn_like(mean)
         raw   = mean + log_std.exp() * noise
         lp    = (-0.5 * noise.pow(2) - log_std - _LOG_SQRT_2PI).sum(-1)
-        dist  = torch.distributions.Categorical(logits=logit)
-        idx   = dist.sample()
-        lp    = lp + torch.where(has, dist.log_prob(idx), torch.zeros_like(lp))
-        idx   = torch.where(has, idx, torch.full_like(idx, -1))
-        return raw.tanh(), raw, idx, lp
+        return raw.tanh(), raw, lp
 
-    def evaluate(self, ego, mem, mask, raw, idx):
-        """Log-prob and entropy of stored (pre-tanh velocity, sensing index)."""
-        mean, log_std, logit = self.forward(ego, mem, mask)
-        has   = mask.any(1)
+    def evaluate(self, ego, mem, mask, raw):
+        """Log-prob and entropy of the stored pre-tanh velocity."""
+        mean, log_std = self.forward(ego, mem, mask)
         noise = (raw - mean) / log_std.exp()
         lp    = (-0.5 * noise.pow(2) - log_std - _LOG_SQRT_2PI).sum(-1)
         ent   = (log_std + 0.5 + _LOG_SQRT_2PI).sum(-1).expand(ego.shape[0])
-        dist  = torch.distributions.Categorical(logits=logit)
-        safe  = idx.clamp(min=0)
-        lp    = lp + torch.where(has, dist.log_prob(safe), torch.zeros_like(lp))
-        ent   = ent + torch.where(has, dist.entropy(), torch.zeros_like(lp))
         return lp, ent
 
 

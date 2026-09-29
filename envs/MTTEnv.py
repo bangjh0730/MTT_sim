@@ -2,7 +2,7 @@ import numpy as np
 
 from config.params import (
     NUM_UAVS, NUM_TARGETS, MAP_SIZE, T_SLOTS, DT,
-    SNR_MIN, V_MAX_TARGET, R_MIN,
+    SNR_MIN, V_MAX, V_MAX_TARGET, R_MIN,
 )
 from components import BS, UAV, Target
 from envs.ekf import predict, update
@@ -174,6 +174,44 @@ class MTTEnv:
         return {i: set(uav.assignment_set) for i, uav in self.uavs.items()}
 
     # ------------------------------------------------------------------
+    def _pick_sensing_target(self, uav) -> int:
+        """Which member the radar points at: the most uncertain one it can see.
+
+        Not a control and not learned - the policy's only action is (dvx, dvy).
+        Attention goes where the track is worst, among the members actually
+        within detection range.
+
+        The in-range filter is not a refinement, it is what makes the rule work.
+        argmax tr(Sigma) over the whole set deadlocks: an out-of-range member is
+        never measured, so its tr(Sigma) grows without bound, so it stays the
+        argmax forever and the radar sits pointed at something unreachable while
+        the UAV senses nothing. Measured, that costs almost all throughput
+        (0.002 rescues/slot, 5% of targets cleared). Restricted to what is
+        visible the pathology cannot arise, since anything sensed drops out of
+        contention at once.
+
+        Nothing is abandoned by this. An out-of-range member keeps accumulating
+        tr(Sigma), so the moment the policy brings it inside the footprint it is
+        the argmax and gets served first. Going to fetch it is the policy's job:
+        the radar cannot reach what the UAV has not flown to.
+
+        The cost of breadth follows: a set of m gives each member roughly one
+        slot in m, so its rescue rate falls about as 1/m, and a spread-out set
+        leaves members outside the footprint entirely. Keeping sets compact and
+        reachable is the allocator's job.
+        """
+        members = [k for k in uav.assignment_set if k in self.targets]
+        if not members:
+            uav.sensing_target = None
+            return None
+        visible = [k for k in members
+                   if radar_snr(uav, self.ekf_state[k][0][:2]) >= SNR_MIN]
+        pool = visible or members     # nothing visible: the slot is wasted anyway
+        k = max(pool, key=lambda k: float(np.trace(self.ekf_state[k][1][:2, :2])))
+        uav.sensing_target = k
+        return k
+
+    # ------------------------------------------------------------------
     def _compute_set_snr(self) -> dict:
         """{uav: {member: SNR it would get pointing there from here}}. Diagnostic."""
         out = {i: {k: float(radar_snr(uav, self.ekf_state[k][0][:2]))
@@ -235,19 +273,16 @@ class MTTEnv:
     def step(self, actions: dict) -> tuple:
         """One slot. Returns (state, info).
 
-        actions: {uav_id: (dvx, dvy, k)}, k the member of the UAV's set to
-        sense this slot, or None to sense nothing. Which member to sense is the
-        UAV's own decision; a k outside its set senses nothing.
+        actions: {uav_id: (dvx, dvy)}. Which member to sense is NOT a control -
+        the radar cycles the assigned set round-robin, see _pick_sensing_target.
         """
         self.t += 1
         uav_ids = sorted(self.uavs)
 
         for i, uav in self.uavs.items():
-            a = actions.get(i, (0.0, 0.0, None))
+            a = actions.get(i, (0.0, 0.0))
             uav.step(a[0], a[1])
-            k = a[2] if len(a) > 2 else None
-            uav.sensing_target = k if (k is not None and k in uav.assignment_set
-                                       and k in self.targets) else None
+            self._pick_sensing_target(uav)
 
         # ---- sensing: one member per UAV ----
         measurements: dict = {k: [] for k in self.targets}
