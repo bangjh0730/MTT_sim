@@ -4,7 +4,7 @@ from config.params import LAMBDA_RESCUE
 
 
 def rescue_prob(trace_pos: float) -> float:
-    """p_r = lambda / (lambda + tr(Sigma_pos)) - Eq. (6).
+    """p_r = lambda / (lambda + tr(Sigma_pos)).
 
     Continuous in the tracking uncertainty, so no "is this target tracked" gate
     is needed: an unsensed target's tr(Sigma) grows without bound and drives p_r

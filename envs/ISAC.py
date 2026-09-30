@@ -22,7 +22,7 @@ def _slant_range(uav, target_pos2d):
 
 # ---------------------------------------------------------------- radar sensing
 def radar_snr(uav, target_pos2d, tau=TAU_SENSE):
-    """Radar SNR of the echo from a target — Eq. (7).
+    """Radar SNR of the echo from a target.
 
     SNR = SNR0 * (tau / tau0) * (r / r0)^-4
 
@@ -36,7 +36,7 @@ def radar_snr(uav, target_pos2d, tau=TAU_SENSE):
 
 
 def measure(uav, target_pos2d):
-    """Range-and-bearing measurement of a target — Eqs. (8)-(10).
+    """Range-and-bearing measurement of a target.
 
     Returns (z, R, snr): the noisy measurement, its noise covariance, and the
     radar SNR that produced it.
@@ -65,7 +65,7 @@ def measure(uav, target_pos2d):
 
 # ------------------------------------------------------------------- uplink
 def uplink_snr_batch(positions: np.ndarray, bs_pos: np.ndarray) -> np.ndarray:
-    """Uplink SNR at the BS for N UAVs at once — Eqs. (11)-(12).
+    """Uplink SNR at the BS for N UAVs at once.
 
     LoS air-to-ground channel power gain h = Gt*Gc*lambda^2 / ((4*pi)^2 * d^2)
     with d the 3D UAV-BS distance, then gamma = Ptx*h / N0.
@@ -85,7 +85,7 @@ def uplink_snr(uav, bs) -> float:
 
 
 def uplink_rate(gamma) -> float:
-    """Achievable uplink rate over the communication sub-slot — Eq. (13).
+    """Achievable uplink rate over the communication sub-slot.
 
     R = (1 - tau) * B * log2(1 + gamma), with the sensing/communication split
     fixed by the ISAC sensing fraction.

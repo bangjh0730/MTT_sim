@@ -171,7 +171,7 @@ def eval_agentic(env, save_path: str, seed: int = None, births: bool = True,
     print(f"  Targets appeared      : {env.n_born_total}")
     print(f"  Targets rescued       : {len(env.rescue_delays)}")
     print(f"  Still awaiting rescue : {len(env.targets)}")
-    print(f"  Avg rescue delay (Eq. 19, over all target-slots): "
+    print(f"  Avg rescue delay (over all target-slots): "
           f"{env.avg_rescue_delay:.2f} s")
     print(f"  Mean delay of completed rescues                 : "
           f"{env.mean_completed_delay:.2f} s")

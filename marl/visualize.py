@@ -290,7 +290,7 @@ def plot_timeline(log, out):
                 Line2D([], [], ls="none", marker="o", ms=6, color=INK_2, mec=SURFACE, label="rescued")]
     ax2.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.005, 1),
                frameon=False, fontsize=8.5, labelcolor=INK_2)
-    ax1.set_title(f"D = {log['D']:.1f} s (Eq. 19) · mean delay of rescued targets "
+    ax1.set_title(f"D = {log['D']:.1f} s · mean delay of rescued targets "
                   f"{log['completed']:.1f} s · {log['n_rescued']} of {log['n_born']} rescued",
                   fontsize=10, color=INK, loc="left")
     fig.tight_layout()

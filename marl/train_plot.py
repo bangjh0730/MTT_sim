@@ -46,7 +46,7 @@ def plot_training_curves(
     plt.close(fig)
 
     # ── 2. Average rescue delay ──────────────────────────────────────────────
-    # The mission objective itself: D-bar of Eq. (19), in seconds. Tracking
+    # The mission objective itself: mean rescue delay in seconds. Tracking
     # accuracy is not plotted, because with |K| > |U| most targets are unsensed
     # in any given slot by construction, so an accuracy average says little about
     # whether the fleet is actually clearing its backlog.

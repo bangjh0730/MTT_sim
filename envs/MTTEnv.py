@@ -40,13 +40,14 @@ class MTTEnv:
     ONE member per slot. Unsensed members run predict-only EKF steps, their
     tr(Sigma) grows and their rescue probability falls - that starvation is the
     cost of breadth and what the allocator trades against. Targets leave only by
-    being rescued; the objective is the average rescue delay, Eq. (19).
+    being rescued; the objective is the average rescue delay.
 
-    Per slot: kinematics (1) -> measurement of the chosen member (7)-(10) ->
+    Per slot: kinematics (1) -> measurement of the pointed member (7)-(10) ->
     EKF (14)-(18) -> rescue (6) -> target motion (2).
 
-    Actions are {uav_id: (dvx, dvy, k)}: a velocity increment and which member
-    of the set to sense. The dwell split is fixed, not a control.
+    Actions are {uav_id: (dvx, dvy)}, a velocity increment. Which member the
+    radar points at is not a control: it is the most uncertain member currently
+    in range, see _pick_sensing_target. The dwell split is fixed too.
     """
 
     def __init__(self, num_uavs=NUM_UAVS, num_targets=NUM_TARGETS,
@@ -64,7 +65,7 @@ class MTTEnv:
 
         self.rescue_delays:   list = []   # slots, one per rescued target
         self.rescued_targets: list = []   # (id, birth, rescue, delay)
-        self.backlog_sum:     int  = 0    # sum_t |K^t|, numerator of Eq. (19)
+        self.backlog_sum:     int  = 0    # sum_t |K^t|
         self.n_born_total:    int  = 0    # N
 
         # p_r of each live target at the end of the previous slot; the reward is
@@ -178,27 +179,17 @@ class MTTEnv:
         """Which member the radar points at: the most uncertain one it can see.
 
         Not a control and not learned - the policy's only action is (dvx, dvy).
-        Attention goes where the track is worst, among the members actually
-        within detection range.
 
-        The in-range filter is not a refinement, it is what makes the rule work.
-        argmax tr(Sigma) over the whole set deadlocks: an out-of-range member is
-        never measured, so its tr(Sigma) grows without bound, so it stays the
-        argmax forever and the radar sits pointed at something unreachable while
-        the UAV senses nothing. Measured, that costs almost all throughput
-        (0.002 rescues/slot, 5% of targets cleared). Restricted to what is
-        visible the pathology cannot arise, since anything sensed drops out of
-        contention at once.
+        The in-range filter is what makes the rule work rather than a refinement
+        of it. Over the whole set the argmax deadlocks: an out-of-range member is
+        never measured, so its tr(Sigma) grows without bound and it holds the aim
+        forever while the UAV senses nothing (0.002 rescues/slot against 0.043).
+        Nothing is abandoned either way - an unseen member keeps accumulating
+        tr(Sigma) and is served first once the policy brings it in range.
 
-        Nothing is abandoned by this. An out-of-range member keeps accumulating
-        tr(Sigma), so the moment the policy brings it inside the footprint it is
-        the argmax and gets served first. Going to fetch it is the policy's job:
-        the radar cannot reach what the UAV has not flown to.
-
-        The cost of breadth follows: a set of m gives each member roughly one
-        slot in m, so its rescue rate falls about as 1/m, and a spread-out set
-        leaves members outside the footprint entirely. Keeping sets compact and
-        reachable is the allocator's job.
+        A set of m gives each member roughly one slot in m, so per-target rescue
+        rate falls about as 1/m and a spread-out set leaves members outside the
+        footprint entirely. Compactness is the allocator's problem.
         """
         members = [k for k in uav.assignment_set if k in self.targets]
         if not members:
@@ -256,7 +247,7 @@ class MTTEnv:
     # ------------------------------------------------------------------
     @property
     def avg_rescue_delay(self) -> float:
-        """D-bar = (dt / N) * sum_t |K^t| - Eq. (19).
+        """Average rescue delay: (dt / N) * sum_t |K^t|.
 
         Over target-slots, so a target still waiting at the end contributes the
         slots it has already waited instead of being dropped.
@@ -281,7 +272,7 @@ class MTTEnv:
 
         for i, uav in self.uavs.items():
             a = actions.get(i, (0.0, 0.0))
-            uav.step(a[0], a[1])
+            uav.step(a[0], a[1], self.map_size)
             self._pick_sensing_target(uav)
 
         # ---- sensing: one member per UAV ----
@@ -352,7 +343,7 @@ class MTTEnv:
             "avg_rescue_delay_s": self.avg_rescue_delay,
             "n_unassigned":       len(set(self.targets) - assigned),
             "load":               {i: self.uavs[i].load for i in self.uavs},
-            # reward inputs, Eq. (25); sets are pre-removal so a UAV keeps credit
+            # reward inputs; sets are pre-removal so a UAV keeps credit
             # for a target it just got rescued
             "rescue_prob":        pr_now,
             "rescue_prob_prev":   pr_prev,
@@ -374,7 +365,7 @@ class MTTEnv:
 
     # ------------------------------------------------------------------
     def _system_state(self) -> dict:
-        """Full system state S^t - Eq. (21)."""
+        """Full system state S^t."""
         return {
             "t": self.t,
             "uavs":        {i: uav.state.copy()        for i, uav in self.uavs.items()},

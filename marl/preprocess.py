@@ -4,7 +4,7 @@ from config.params import (MAP_SIZE, V_MAX, V_MAX_TARGET, NUM_UAVS,
                            SIGMA_FEATURE, LAMBDA_RESCUE,
                            SNR0, TAU_SENSE, TAU0, R0, SNR_MIN, H)
 
-# Local observation, Eq. (24), as a SET - no padding and no ceiling on |A_i|:
+# Local observation as a SET - no padding and no ceiling on |A_i|:
 #   ego (EGO_DIM)          x/MAP, y/MAP, vx/V_MAX, vy/V_MAX, |A|/SET_SCALE
 #   one row per member     dx/MAP, dy/MAP, dist/MAP, vx/VT, vy/VT, sigma-tilde,
 #   (MEM_DIM)              in-range
@@ -28,13 +28,13 @@ U_DIM = 6
 T_DIM = 12
 
 # Horizontal radius of the detection footprint, from SNR(r_slant) = SNR_min in
-# Eq. (7). Squared, for a cheap comparison.
+# Squared, for a cheap comparison.
 _R_SLANT_DET = R0 * (SNR0 * (TAU_SENSE / TAU0) / SNR_MIN) ** 0.25
 R_DETECT_2   = max(_R_SLANT_DET ** 2 - H ** 2, 0.0)
 
 
 def _sigma_scalar(Sigma) -> float:
-    """Per-target uncertainty scalar of Eq. (24), normalised to [0, 1]."""
+    """Per-target uncertainty scalar, normalised to [0, 1]."""
     tr = float(Sigma[0, 0] + Sigma[1, 1])
     if SIGMA_FEATURE == "log":
         return min(max(1.0 - (math.log10(max(tr, 1e-4)) + 4.0) / 10.0, 0.0), 1.0)
@@ -66,10 +66,9 @@ def _ego(state: dict, uav_id: int) -> np.ndarray:
 def local_obs(state: dict, uav_id: int, info: dict = None):
     """Returns (ego [EGO_DIM], members [|A_i|, MEM_DIM], member ids [|A_i|]).
 
-    Row j of `members` is target member_ids[j]. Every member of the assignment
-    set is included whatever its range, with an in-range flag as the last
-    column, so a target the radar currently cannot reach is still visible to the
-    policy - which is what lets it decide to go and fetch it.
+    Row j of `members` is target member_ids[j]. Every member is included
+    whatever its range, with an in-range flag as the last column, so a target
+    the radar cannot currently reach is still visible to the policy.
     """
     x, y = state["uavs"][uav_id][:2]
     ids  = _members_by_distance(state, uav_id, x, y)

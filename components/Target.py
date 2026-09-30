@@ -7,7 +7,7 @@ _Q_SQRT = _vecs @ np.diag(np.sqrt(np.maximum(_vals, 0.0)))
 
 
 class Target:
-    """Ground target, constant velocity with perturbation - Eq. (2).
+    """Ground target, constant velocity with perturbation.
 
     Persists from birth until rescued; there is no random death.
     """

@@ -171,7 +171,7 @@ class MAPPO:
             b.values.append(self._values(c_ego, c_uav, c_tgt))
 
         # Scale tanh output [-1, 1] -> env units. The resulting speed is clamped
-        # to V_MAX inside UAV.step, so constraint (20a) always holds.
+        # to V_MAX inside UAV.step.
         env_actions = {}
         for i in range(self.num_uavs):
             env_actions[i] = (float(act[i, 0]) * V_MAX,    # dvx in [-V_MAX, V_MAX]
@@ -360,8 +360,8 @@ def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./res
     the actor stays neutral about who forms the sets.
 
     Targets follow the same process as evaluation: NUM_TARGETS at t = 0, then
-    births with probability P_BIRTH per slot (Eq. 5) and rescues with p_r
-    (Eq. 6). The live count is whatever those produce - no population is held
+    births with probability P_BIRTH per slot and rescues with p_r.
+    The live count is whatever those produce - no population is held
     and nothing is capped - so the policy trains on the load it will meet.
     A fresh birth schedule is drawn per episode.
     """
@@ -375,7 +375,7 @@ def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./res
 
     reward_hist        = []
     backlog_hist       = []     # mean |K^t| over the episode
-    delay_hist         = []     # D-bar (Eq. 19), seconds
+    delay_hist         = []     # mean rescue delay, seconds
     rescued_hist       = []     # targets rescued per episode
     actor_loss_hist    = []
     critic_loss_hist   = []

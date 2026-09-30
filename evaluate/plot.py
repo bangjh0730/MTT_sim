@@ -65,7 +65,7 @@ def plot_eval_rescue(backlog_log, rescued_cum_log, delay_log, unassigned_log,
                      plots_dir: str):
     """Mission panel: backlog, cumulative rescues, running average delay.
 
-    Eq. (19) is dt/N times the area under the backlog curve, so the shaded
+    The objective is dt/N times the area under the backlog curve, so the shaded
     region is the quantity being minimised. Unassigned targets are shaded
     separately - a legitimate choice under overload, but one with a visible cost.
     """
@@ -101,7 +101,7 @@ def plot_eval_rescue(backlog_log, rescued_cum_log, delay_log, unassigned_log,
     ax.plot(slots, delay_log, color="darkorange", lw=1.8)
     ax.set_ylabel(r"$\bar{D}$ (s)")
     ax.set_xlabel("Slot")
-    ax.set_title("Running average rescue delay (Eq. 19)")
+    ax.set_title("Running average rescue delay")
     ax.grid(True, ls=":", alpha=0.4)
 
     fig.tight_layout()
@@ -140,7 +140,7 @@ def plot_multi_run(runs: list, plots_dir: str):
     axes[1].set_ylabel("rescued (cumulative)")
     axes[1].set_title("Rescue throughput")
     axes[2].set_ylabel(r"$\bar{D}$ (s)")
-    axes[2].set_title("Running average rescue delay (Eq. 19)")
+    axes[2].set_title("Running average rescue delay")
     axes[2].set_xlabel("Slot")
     for a in axes:
         a.legend(fontsize=8)

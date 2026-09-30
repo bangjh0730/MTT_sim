@@ -1,5 +1,5 @@
 def apply_births(env, schedule):
-    """Spawn this slot's scheduled target, if any - Eq. (5).
+    """Spawn this slot's scheduled target, if any.
 
     No admission guard and no ceiling: |K| > |U| is the normal state, and
     refusing births would suppress the contention being studied.
