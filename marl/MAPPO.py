@@ -53,8 +53,13 @@ class MAPPO:
     def __init__(
         self,
         num_uavs:   int   = NUM_UAVS,
-        gamma:      float = 0.99,
-        gae_lambda: float = 0.95,
+        # Rewards arrive ~260 slots after the action that earns them (the mean
+        # rescue delay), and a map crossing is 240 slots. At gamma 0.99 that
+        # payoff is worth 7% of face value and gae_lambda 0.95 cuts credit off
+        # after 20 slots, so approaching a target looked free of consequence.
+        # 0.999 gives a 1000-slot horizon, past the 500-slot training episode.
+        gamma:      float = 0.999,
+        gae_lambda: float = 0.99,
         eps_clip:   float = 0.2,
         k_epochs:   int   = 15,   # Table II
         lr_actor:   float = 3e-4,

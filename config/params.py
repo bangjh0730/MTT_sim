@@ -106,15 +106,10 @@ P_BIRTH = 0.065
 LAMBDA_RESCUE = 1.762e-3   # m^2, R50 = 200 m
 
 # ---- Reward ----
-# r_u = -|A_u| + W_SHAPE * sum_{k in A_u} [p_r,k(t) - p_r,k(t-1)], a rescued
-# member scoring p_r = 1. The first term is the objective, the second is
-# potential-based shaping, so W_SHAPE cannot move the optimum.
-#
-# The shaping is zero on 90% of slots and fires almost only when a rescue lands,
-# because p_r is flat until the last ~150 m; at 10 a rescue is worth about two
-# slots of delay cost. For shaping across the approach itself,
-# Phi = -sum sqrt(tr Sigma_k) is linear in metres and equally policy-invariant.
-W_SHAPE = 10.0
+# r_u = (members of A_u rescued this slot) - |A_u|: reward a rescue, charge a
+# target for every slot it is still waiting. No weights - the two terms are
+# already in the same unit, one target-slot.
+
 
 # ---- Observation ----
 # Per-target uncertainty scalar. "log" is log10(tr Sigma) rescaled to [0,1];
