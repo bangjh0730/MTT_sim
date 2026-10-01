@@ -106,9 +106,7 @@ P_BIRTH = 0.065
 LAMBDA_RESCUE = 1.762e-3   # m^2, R50 = 200 m
 
 # ---- Reward ----
-# r_u = (members of A_u rescued this slot) - |A_u|: reward a rescue, charge a
-# target for every slot it is still waiting. No weights - the two terms are
-# already in the same unit, one target-slot.
+# See marl.reward: the weight lives with the term it scales.
 
 
 # ---- Observation ----
