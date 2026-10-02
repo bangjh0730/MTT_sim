@@ -1,6 +1,6 @@
 """Roll out one episode with the trained policy and draw what happened.
 
-    python -m marl.visualize --save ./results --seed 0 [--p-birth 0.65] [--gif]
+    python -m marl.visualize --save ./results --seed 0 [--p-birth 0.1] [--gif]
 
 No LLM: targets are assigned by the training partitioner, fixed to a clean
 style (k-means, natural sizes, no noise) so the picture shows the policy, not
@@ -19,7 +19,7 @@ import os
 
 import numpy as np
 
-from config.params import MAP_SIZE, DT, T_SLOTS_TRAIN
+from config.params import MAP_SIZE, DT, T_SLOTS_TRAIN, P_BIRTH
 
 # ---- style: reference palette, light mode (categorical slots 1-3, all-pairs
 # validated for 3 series; aqua is below 3:1 on the surface, so UAVs are also
@@ -349,7 +349,9 @@ def main():
     ap.add_argument("--save", default="./results", help="directory with marl_actor.pth")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--slots", type=int, default=T_SLOTS_TRAIN)
-    ap.add_argument("--p-birth", type=float, default=None, help="override P_BIRTH")
+    ap.add_argument("--p-birth", type=float, default=None,
+                    help="override P_BIRTH; defaults to the configured "
+                         f"{P_BIRTH} from config.params")
     ap.add_argument("--stochastic", action="store_true", help="sample actions instead of the mean")
     ap.add_argument("--gif", action="store_true", help="also write an animation")
     ap.add_argument("--out", default=None, help="output directory (default <save>/viz)")

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from config.params import NUM_UAVS, NUM_TARGETS, V_MAX
-from marl.actor_critic import MAPPOActor, CentralizedCritic
+from marl.actor_critic import MAPPOActor, CentralizedCritic, LOG_STD_MIN, LOG_STD_MAX
 from marl.preprocess   import (local_obs, critic_obs_all, pad_sets,
                                EGO_DIM, MEM_DIM, U_DIM, T_DIM)
 from marl.reward       import per_agent_rewards
@@ -64,7 +64,12 @@ class MAPPO:
         k_epochs:   int   = 15,   # Table II
         lr_actor:   float = 3e-4,
         lr_critic:  float = 3e-4,
-        entropy_c:  float = 0.01,
+        # 1e-3, not 1e-2. At 1e-2 the entropy bonus is 0.038 at the log_std
+        # ceiling while the whole actor loss measured -0.037 to -0.045, so the
+        # bonus dominated the policy gradient and could drive log_std up until
+        # the policy was random. Escaping was a race decided in the first few
+        # hundred episodes, which made outcomes seed-dependent.
+        entropy_c:  float = 1e-3,
         update_every_episodes: int = 10,
         row_budget: int = 1 << 18,
     ):
@@ -328,6 +333,13 @@ class MAPPO:
 
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
             self.actor_optim.step()
+            # Keep log_std inside its bounds in the PARAMETER, not just in the
+            # forward clamp. torch.clamp has zero gradient outside its range, so
+            # a log_std that drifts past the cap is frozen there for good: one run
+            # reached 0.502 against a 0.5 cap and stayed random for all 20k
+            # episodes. Clamping in place means the bound can never be crossed.
+            with torch.no_grad():
+                self.actor.log_std.clamp_(LOG_STD_MIN, LOG_STD_MAX)
             torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
             self.critic_optim.step()
 
@@ -357,7 +369,8 @@ class MAPPO:
 
 
 # ---------------------------------------------------------------------------
-def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./results"):
+def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./results",
+              seed: int = None):
     """Dec-POMDP training loop. No LLM.
 
     Assignment sets come from TrainingPartitioner, a geometric surrogate for the
@@ -375,7 +388,10 @@ def MAPPO_run(env, num_episodes: int = DEFAULT_EPISODES, save_path: str = "./res
     from envs.schedule    import DisturbanceSchedule
 
     agent = MAPPO()
-    rng   = np.random.default_rng()
+    # Seeded, or a run is not reproducible: this stream drives the allocator's
+    # per-episode draws and the birth schedule, neither of which
+    # np.random.seed reaches.
+    rng   = np.random.default_rng(seed)
     part  = TrainingPartitioner(rng)
 
     reward_hist        = []

@@ -7,7 +7,7 @@ import numpy as np
 # dead track outpays finishing one - chosen to beat the travel cost of fetching a
 # distant member. Compare against 0, which gave 29 rescues and D 59 s but left
 # 18% of assigned targets never sensed.
-W_TRACK = 5.0
+W_TRACK = 1.0
 
 
 def _track_quality(tr: float) -> float:
