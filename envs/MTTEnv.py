@@ -70,8 +70,6 @@ class MTTEnv:
 
         # p_r of each live target at the end of the previous slot; the reward is
         # the per-slot improvement, so it has to survive the overwrite.
-        self._prev_pr: dict = {}
-        self._prev_trace: dict = {}
 
         # Per-id RNG streams so a target's motion and rescue draws depend only on
         # its own lifetime, not on which other ids are alive. Matters because
@@ -97,8 +95,6 @@ class MTTEnv:
         self.rescued_targets = []
         self.backlog_sum     = 0
         self.n_born_total    = 0
-        self._prev_pr        = {}
-        self._prev_trace     = {}
 
         self.bs = BS(pos2d=[self.map_size / 2, self.map_size / 2])
 
@@ -178,20 +174,23 @@ class MTTEnv:
 
     # ------------------------------------------------------------------
     def _pick_sensing_target(self, uav) -> int:
-        """Which member the radar points at: the most uncertain one it can see.
+        """Which member the radar points at: the nearest one it can see.
 
         Not a control and not learned - the policy's only action is (dvx, dvy).
 
-        The in-range filter is what makes the rule work rather than a refinement
-        of it. Over the whole set the argmax deadlocks: an out-of-range member is
-        never measured, so its tr(Sigma) grows without bound and it holds the aim
-        forever while the UAV senses nothing (0.002 rescues/slot against 0.043).
-        Nothing is abandoned either way - an unseen member keeps accumulating
-        tr(Sigma) and is served first once the policy brings it in range.
+        Nearest rather than most uncertain. p_r depends on CURRENT tr(Sigma) and
+        rescue is drawn every slot, so the slot is worth most where SNR is best: the
+        closest member, whose tr collapses furthest. Aiming at the most uncertain
+        member instead picks whatever sits at the edge of range, where the echo is
+        weakest, so its tr barely falls and it keeps capturing the radar. Measured
+        over 24 episodes, nearest gave D 50.3 s against 56.7 s and 0.83
+        measurements per slot against 0.75.
 
-        A set of m gives each member roughly one slot in m, so per-target rescue
-        rate falls about as 1/m and a spread-out set leaves members outside the
-        footprint entirely. Compactness is the allocator's problem.
+        Nothing starves: the nearest member is rescued and leaves the set, so the
+        next nearest takes over and the set drains in range order.
+
+        The in-range filter means a UAV with nothing visible aims at its nearest
+        member anyway, which is the one worth flying to.
         """
         members = [k for k in uav.assignment_set if k in self.targets]
         if not members:
@@ -199,8 +198,9 @@ class MTTEnv:
             return None
         visible = [k for k in members
                    if radar_snr(uav, self.ekf_state[k][0][:2]) >= SNR_MIN]
-        pool = visible or members     # nothing visible: the slot is wasted anyway
-        k = max(pool, key=lambda k: float(np.trace(self.ekf_state[k][1][:2, :2])))
+        pool = visible or members
+        k = min(pool, key=lambda k: float(
+            np.linalg.norm(self.ekf_state[k][0][:2] - uav.pos2d)))
         uav.sensing_target = k
         return k
 
@@ -218,12 +218,6 @@ class MTTEnv:
         mu0 = tgt.state.copy()
         self.ekf_state[k] = (mu0, SIGMA0_INIT.copy())
         self.bs.add_target(k, mu0, SIGMA0_INIT.copy())
-        # Seed the reward baseline so a new target contributes a zero delta on
-        # its first slot rather than a spurious jump.
-        tr0 = float(np.trace(SIGMA0_INIT[:2, :2]))
-        self._prev_pr[k]    = rescue_prob(tr0)
-        self._prev_trace[k] = tr0
-
     def spawn_target(self, init_state=None):
         """Birth a target in a free id slot. NOT assigned to anyone - a birth is
         the event the allocator exists to respond to."""
@@ -243,8 +237,6 @@ class MTTEnv:
     def remove_target(self, k: int) -> None:
         self.targets.pop(k, None)
         self.ekf_state.pop(k, None)
-        self._prev_pr.pop(k, None)
-        self._prev_trace.pop(k, None)
         self.bs.remove_target(k)
         for uav in self.uavs.values():
             uav.drop_target(k)
@@ -326,13 +318,9 @@ class MTTEnv:
 
         trace_pos = {k: float((self.ekf_state[k][1][0, 0] + self.ekf_state[k][1][1, 1])) for k in self.targets}
         pr_now    = {k: rescue_prob(v) for k, v in trace_pos.items()}
-        pr_prev   = {k: self._prev_pr.get(k, pr_now[k]) for k in self.targets}
-        tr_prev   = {k: self._prev_trace.get(k, trace_pos[k]) for k in self.targets}
         sets_pre  = {i: sorted(self.uavs[i].assignment_set) for i in self.uavs}
 
         rescued = apply_rescues(self)
-        self._prev_pr    = {k: pr_now[k] for k in self.targets}
-        self._prev_trace = {k: trace_pos[k] for k in self.targets}
 
         for k, tgt in self.targets.items():
             tgt.step(map_size=self.map_size, rng=self._motion_rngs[k])
@@ -353,10 +341,8 @@ class MTTEnv:
             # reward inputs; sets are pre-removal so a UAV keeps credit
             # for a target it just got rescued
             "rescue_prob":        pr_now,
-            "rescue_prob_prev":   pr_prev,
             "assignments_pre":    sets_pre,
             "trace_pos_per_target": trace_pos,
-            "trace_pos_per_target_prev": tr_prev,
             "time_since_sensed": {k: self.t - self.targets[k].last_sensed_slot
                                   for k in self.targets},
             "sensed_now":  sorted(sensed_now),

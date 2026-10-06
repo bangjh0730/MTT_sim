@@ -61,15 +61,10 @@ class MAPPO:
         gamma:      float = 0.999,
         gae_lambda: float = 0.99,
         eps_clip:   float = 0.2,
-        k_epochs:   int   = 15,   # Table II
+        k_epochs:   int   = 15,
         lr_actor:   float = 3e-4,
         lr_critic:  float = 3e-4,
-        # 1e-3, not 1e-2. At 1e-2 the entropy bonus is 0.038 at the log_std
-        # ceiling while the whole actor loss measured -0.037 to -0.045, so the
-        # bonus dominated the policy gradient and could drive log_std up until
-        # the policy was random. Escaping was a race decided in the first few
-        # hundred episodes, which made outcomes seed-dependent.
-        entropy_c:  float = 1e-3,
+        entropy_c:  float = 1e-2,
         update_every_episodes: int = 10,
         row_budget: int = 1 << 18,
     ):

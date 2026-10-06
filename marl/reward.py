@@ -1,59 +1,28 @@
-import math
-
 import numpy as np
-
-# Weight on the track term, relative to +1 for a completed rescue. At 5 the
-# track term is ~4x the completion bonus over a target's life and re-acquiring a
-# dead track outpays finishing one - chosen to beat the travel cost of fetching a
-# distant member. Compare against 0, which gave 29 rescues and D 59 s but left
-# 18% of assigned targets never sensed.
-W_TRACK = 1.0
-
-
-def _track_quality(tr: float) -> float:
-    """Track quality in [0, 1] from tr(Sigma_pos): 1 is pinned, 0 is lost.
-
-    log10 rather than p_r, which is already 3e-7 at sigma = 71 m and so charges
-    nothing for a target left to rot. 0.110 at birth, 0.875 sensed from 200 m,
-    0 past sigma = 1000 m.
-    """
-    return min(max(1.0 - (math.log10(max(tr, 1e-4)) + 4.0) / 10.0, 0.0), 1.0)
 
 
 def per_agent_rewards(info: dict, uavs: dict) -> np.ndarray:
-    """r_u = (members of A_u rescued) + W_TRACK * sum_{k in A_u} [u_k(t) - u_k(t-1)]
+    """r_u = number of members of A_u rescued this slot.
 
-    Reward a rescue, reward holding the tracks of members still waiting. A
-    rescued member scores +1 and its u change is not also counted; a member on
-    its first slot has tr_prev seeded to its birth covariance, so it contributes
-    nothing rather than a spurious jump.
+    Speed is carried by the discount, not by the reward: a rescue at slot d is
+    worth gamma^d, so sooner is worth more. Charging -1 per slot a target is
+    still held is the same objective up to a constant 1/(1-gamma) per target,
+    but that constant scales with |A_u|, which the assigner sets rather than the
+    policy, so paying on rescue keeps only what the UAV did.
 
-    Not -|A_u|: that level is set by the assigner, and a birth raises it through
-    no act of the policy. A change in u comes only from sensing or failing to.
+    Sets are read BEFORE this slot's rescue removals, so a UAV keeps credit for
+    a target it just got rescued.
 
-    Not policy-invariant, deliberately. Shaping is invariant only as
-    gamma*u(t) - u(t-1); written undiscounted it adds a standing reward of about
-    (1-gamma)*u per slot per member, so the objective is delay plus a preference
-    for keeping members tracked. That bias is what stops the policy writing off
-    distant members, and it cannot be farmed by hoarding a pinned track because
-    rescue fires involuntarily once p_r is high.
-
-    Needs info keys: assignments_pre, rescued, trace_pos_per_target,
-    trace_pos_per_target_prev.
+    A track-quality term was tried and removed. It was meant to stop the policy
+    writing off distant members, and did not: never-sensed stayed at 20% against
+    18% without it, and rose to 27% when weighted more heavily. At its best
+    weight it was also slightly worse on the objective (D 65.7 s against 62.9 s
+    at matched settings).
     """
-    N       = len(uavs)
     sets    = info.get("assignments_pre", info.get("assignments", {}))
     rescued = set(info.get("rescued", ()))
-    tr_now  = info.get("trace_pos_per_target", {})
-    tr_prev = info.get("trace_pos_per_target_prev", {})
 
-    rewards = np.zeros(N, dtype=np.float32)
-    for i in range(N):
-        saved, track = 0, 0.0
-        for k in sets.get(i, ()):
-            if k in rescued:
-                saved += 1
-            elif k in tr_now and k in tr_prev:
-                track += _track_quality(tr_now[k]) - _track_quality(tr_prev[k])
-        rewards[i] = float(saved) + W_TRACK * float(track)
+    rewards = np.zeros(len(uavs), dtype=np.float32)
+    for i in range(len(uavs)):
+        rewards[i] = float(sum(1 for k in sets.get(i, ()) if k in rescued))
     return rewards

@@ -12,7 +12,7 @@ LOG_STD_INIT = -0.5
 LOG_STD_MIN  = -4.0
 # 0.0, i.e. action std capped at 1.0. At the old 0.5 the std reached 1.65, which
 # after tanh is nearly bang-bang, and the entropy bonus could pin log_std there:
-# one W_TRACK run sat at [0.502, 0.501] for all 20k episodes and behaved as a
+# one run sat at [0.502, 0.501] for all 20k episodes and behaved as a
 # random policy (D 134 s, 4 rescues) while the others converged.
 LOG_STD_MAX  = 0.0
 

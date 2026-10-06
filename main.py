@@ -35,12 +35,11 @@ def main():
     from envs.MTTEnv    import MTTEnv
     from marl           import MAPPO_run, DEFAULT_EPISODES
     from evaluate.utils import save_raw_eval
-    import marl.reward as reward
 
     # Logged so a run's own output records what produced it. Edit the values in
     # config/params.py and marl/reward.py; they are not command-line flags.
     print(f"[Config] lambda={params.LAMBDA_RESCUE}  p_birth={params.P_BIRTH}  "
-          f"w_track={reward.W_TRACK}  one_to_many={params.ONE_TO_MANY}  "
+          f"one_to_many={params.ONE_TO_MANY}  "
           f"map={params.MAP_SIZE:.0f}  seed={args.seed}")
 
     if args.mode == "train":
