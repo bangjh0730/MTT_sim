@@ -8,6 +8,7 @@ from components import BS, UAV, Target
 from envs.ekf import predict, update
 from envs.ISAC import measure, uplink_snr_batch, uplink_rate, radar_snr
 from envs.rescue import apply_rescues, rescue_prob
+from envs.hotspots import HotspotField
 
 # Initial EKF prior for every target: position std 200 m, velocity std 5 m/s.
 SIGMA0_INIT = np.diag([200.0**2, 200.0**2, 5.0**2, 5.0**2])
@@ -67,9 +68,7 @@ class MTTEnv:
         self.rescued_targets: list = []   # (id, birth, rescue, delay)
         self.backlog_sum:     int  = 0    # sum_t |K^t|
         self.n_born_total:    int  = 0    # N
-
-        # p_r of each live target at the end of the previous slot; the reward is
-        # the per-slot improvement, so it has to survive the overwrite.
+        self.field: HotspotField = None   # where survivors appear, set per reset
 
         # Per-id RNG streams so a target's motion and rescue draws depend only on
         # its own lifetime, not on which other ids are alive. Matters because
@@ -83,11 +82,10 @@ class MTTEnv:
 
     # ------------------------------------------------------------------
     def _random_target_state(self):
-        """Spawn state: position uniform over the area, heading and speed uniform."""
-        pos = np.random.uniform(0.05 * self.map_size, 0.95 * self.map_size, size=2)
-        spd = np.random.uniform(0.0, V_MAX_TARGET)
-        ang = np.random.uniform(0.0, 2.0 * np.pi)
-        return pos, spd * np.array([np.cos(ang), np.sin(ang)])
+        """Spawn state from the mission's site field: (pos, vel, site)."""
+        if self.field is None:
+            self.field = HotspotField(int(np.random.randint(2**31)), self.map_size)
+        return self.field.sample()
 
     def reset(self) -> dict:
         self.t = 0
@@ -98,10 +96,16 @@ class MTTEnv:
 
         self.bs = BS(pos2d=[self.map_size / 2, self.map_size / 2])
 
+        # Sites are drawn once per mission from their own stream, seeded off the
+        # global one, so a given seed reproduces both the sites and the order in
+        # which survivors appear at them, whatever the UAVs do.
+        self.field = HotspotField(int(np.random.randint(2**31)), self.map_size)
+
         self.targets = {}
         for k in range(self.num_targets):
-            pos, vel = self._random_target_state()
+            pos, vel, site = self._random_target_state()
             self.targets[k] = Target(k, pos, vel, birth_slot=0)
+            self.targets[k].site = site
         self.n_born_total = len(self.targets)
 
         bs_center = self.bs.pos
@@ -224,12 +228,14 @@ class MTTEnv:
         k = next(k for k in range(len(self.targets) + 1) if k not in self.targets)
 
         if init_state is None:
-            pos, vel = self._random_target_state()
+            pos, vel, site = self._random_target_state()
         else:
             pos = np.array(init_state[:2], dtype=float)
             vel = np.array(init_state[2:], dtype=float)
+            site = -1
 
         self.targets[k] = Target(k, pos, vel, birth_slot=self.t)
+        self.targets[k].site = site
         self._register_estimate(k, self.targets[k])
         self.n_born_total += 1
         return k

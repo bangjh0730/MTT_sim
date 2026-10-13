@@ -91,7 +91,27 @@ R_MIN = 1e6   # bps
 #
 # 0.065 sits just over the knee, so the load rises through the episode rather
 # than holding flat. Measured with a stand-in policy; recheck once trained.
-P_BIRTH = 0.065
+P_BIRTH = 0.08
+
+# ---- Disaster sites ----
+# Survivors cluster around disaster sites rather than appearing uniformly
+# [Hayajneh et al., IEEE Access 2018]. Sites are a thinned Poisson process -
+# structures at SITE_DENSITY, each destroyed with probability P_DESTROY - and
+# survivors scatter about each as a Thomas cluster with spread drawn from the
+# Stienen radius distribution, mean 1/(2 tau sqrt(lambda)) = 250 m, about one
+# sensing footprint. On a 3 km map that is 2.7 sites per mission on average,
+# conditioned on at least one (unconditioned, 7% of missions would have none).
+#
+# Extended in time here: sites persist, each holds a Poisson number of
+# survivors that are born one at a time and run out, and a share of births is
+# uniform background. Sites are never shown to the allocator; it has to infer
+# them from the births it has seen. HOTSPOTS = False restores uniform births.
+HOTSPOTS       = True
+SITE_DENSITY   = 1e-6   # m^-2, structure density lambda [Hayajneh]
+P_DESTROY      = 0.3    # p^o [Hayajneh]
+SITE_TAU       = 2.0    # Stienen tau [Hayajneh]
+SITE_OCCUPANCY = 20     # mean survivors per site
+P_BACKGROUND   = 0.2    # share of births tied to no site
 
 # ---- Rescue ----
 # p_r = LAMBDA_RESCUE / (LAMBDA_RESCUE + tr(Sigma_pos)), so lambda is readable as

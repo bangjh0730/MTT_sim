@@ -22,6 +22,7 @@ class Target:
         self.rescue_slot      = None
         self.rescued          = False
         self.last_sensed_slot = int(birth_slot)
+        self.site             = -1     # origin site, for analysis only; never observed
 
     def rescue_delay(self, t_now: int) -> int:
         """Slots spent awaiting rescue; censored at t_now if still waiting."""

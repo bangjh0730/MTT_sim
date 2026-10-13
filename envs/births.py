@@ -6,5 +6,5 @@ def apply_births(env, schedule):
     """
     born = []
     if env.t in schedule.births:
-        born.append(env.spawn_target(init_state=schedule.births[env.t]))
+        born.append(env.spawn_target())
     return born

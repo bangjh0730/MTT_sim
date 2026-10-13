@@ -11,9 +11,15 @@ from config.params import (MAP_SIZE, V_MAX, V_MAX_TARGET, NUM_UAVS,
 #
 # in-range is 1 when the member's estimate lies inside the detection footprint
 # (SNR >= SNR_min) - information the UAV has from its own position and the
-# estimate, not a sensing rule. Which member to sense is the actor's choice.
-# Rows are ordered by distance only for determinism; the network is
-# permutation-equivariant over them.
+# estimate, not a sensing rule.
+#
+# No "staged" field. Pre-commitments are the BS agent's business: a UAV serves
+# the set it is given and the allocator decides what is in it, including ahead
+# of an event. Telling the UAV which members are not yet its job buys nothing
+# anyway - drifting toward a target 1400 m away costs p_r on the one in hand
+# (0.50 at 200 m against 0.158 at 300 m) and gains ~2 slots against a 112-slot
+# transit, so flying at the nearest member is already the right answer. The
+# lever is which UAV gets pre-committed, not what it knows about the set.
 EGO_DIM   = 5
 MEM_DIM   = 7
 SET_SCALE = 10.0   # feature scale for set sizes, not a bound
@@ -67,8 +73,9 @@ def local_obs(state: dict, uav_id: int, info: dict = None):
     """Returns (ego [EGO_DIM], members [|A_i|, MEM_DIM], member ids [|A_i|]).
 
     Row j of `members` is target member_ids[j]. Every member is included
-    whatever its range, with an in-range flag as the last column, so a target
-    the radar cannot currently reach is still visible to the policy.
+    whatever its range, so a target the radar cannot currently reach is still
+    visible to the policy.
+
     """
     x, y = state["uavs"][uav_id][:2]
     ids  = _members_by_distance(state, uav_id, x, y)
